@@ -84,25 +84,39 @@ def sign_staged_binaries(work, args, metadata):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build-outputs', type=Path, default=SOURCE / 'out/Default')
-    parser.add_argument('--dlib', type=Path, required=True,
+    parser.add_argument('--dlib', type=Path,
                         help="Path to the x64 Azure.CodeSigning.Dlib.dll")
     parser.add_argument('--signtool', type=Path, help='Path to x64 signtool.exe')
     parser.add_argument('--arch', choices=('x64', 'arm64'))
     parser.add_argument('--seven-zip', type=Path,
                         default=Path(shutil.which('7z') or 'C:/Program Files/7-Zip/7z.exe'))
+    parser.add_argument('--no-sign', action='store_true',
+                        help='Skip Azure code signing and produce unsigned packages.')
     args = parser.parse_args()
     args.build_outputs = args.build_outputs.resolve()
     args.seven_zip = args.seven_zip.resolve()
-    args.dlib = args.dlib.resolve()
-    if not args.dlib.is_file():
-        parser.error(f'Signing plugin not found: {args.dlib}')
-    args.signtool = args.signtool.resolve() if args.signtool else find_signtool()
+
     required = ('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
                 'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT',
                 'AZURE_SIGNING_CERTIFICATE_NAME')
     missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        parser.error('Missing environment variables: ' + ', '.join(missing))
+    args.sign = not args.no_sign and not missing
+    if args.no_sign:
+        print('--no-sign given; producing unsigned packages.')
+    elif missing:
+        print('Azure signing credentials not fully provided (missing '
+              + ', '.join(missing) + '); producing unsigned packages.')
+
+    if args.sign:
+        if not args.dlib:
+            parser.error('--dlib is required to sign (Azure credentials were provided)')
+        args.dlib = args.dlib.resolve()
+        if not args.dlib.is_file():
+            parser.error(f'Signing plugin not found: {args.dlib}')
+        args.signtool = args.signtool.resolve() if args.signtool else find_signtool()
+    else:
+        args.dlib = None
+        args.signtool = None
 
     return args
 
@@ -128,16 +142,19 @@ def write_signing_metadata(work):
 def main():
     args = parse_args()
     work = package.stage_build(args.build_outputs, args.seven_zip, args.arch)
-    metadata = write_signing_metadata(work)
-    sign_staged_binaries(work, args, metadata)
+    if args.sign:
+        metadata = write_signing_metadata(work)
+        sign_staged_binaries(work, args, metadata)
 
-    # Snapshot the signed inputs before packaging so verification can detect changes.
+    # Snapshot the (possibly signed) inputs before packaging so verification
+    # can detect changes.
     expected = {'payload': package.inventory(work / 'payload'),
                 'portable': package.inventory(work / 'portable'),
                 'setup': package.digest(work / 'setup.exe')}
     nsis, mini, portable = package.build_packages(work, args.build_outputs, args.seven_zip)
     package.verify_packages(work, args.seven_zip, nsis, mini, portable, expected)
-    sign([nsis, mini], 'Helium Installer', args, metadata)
+    if args.sign:
+        sign([nsis, mini], 'Helium Installer', args, metadata)
     emit('artifacts', work / 'artifacts')
 
 

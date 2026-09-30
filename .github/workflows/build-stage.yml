@@ -12,18 +12,20 @@ on:
         required: true
         type: boolean
     secrets:
+      # Optional: without them, signing.py produces unsigned packages instead
+      # of failing. Forks generally don't have these configured.
       AZURE_TENANT_ID:
-        required: true
+        required: false
       AZURE_CLIENT_ID:
-        required: true
+        required: false
       AZURE_CLIENT_SECRET:
-        required: true
+        required: false
       AZURE_SIGNING_ENDPOINT:
-        required: true
+        required: false
       AZURE_SIGNING_ACCOUNT:
-        required: true
+        required: false
       AZURE_SIGNING_CERTIFICATE_NAME:
-        required: true
+        required: false
     outputs:
       finished:
         value: ${{ jobs.build.outputs.finished }}
