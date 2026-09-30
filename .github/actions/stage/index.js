@@ -26,6 +26,13 @@ async function run() {
         await exec.exec('7z', ['x', 'C:\\helium-windows\\build\\artifacts.zip',
             '-oC:\\helium-windows\\build', '-y']);
         await io.rmRF('C:\\helium-windows\\build\\artifacts.zip');
+        // The extracted tree lands uncompressed; shrink it in place before the build resumes.
+        await exec.exec('compact', ['/c', '/s:C:\\helium-windows\\build', '/i'], {ignoreReturnCode: true});
+    } else if (!upload_final) {
+        // Mark the (still empty) build dir compressed so everything build.py writes into it
+        // inherits NTFS compression automatically, with no retroactive scan needed.
+        await io.mkdirP('C:\\helium-windows\\build');
+        await exec.exec('compact', ['/c', 'C:\\helium-windows\\build'], {ignoreReturnCode: true});
     }
 
     const args = ['build.py', '--ci', String(started_at)]

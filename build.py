@@ -17,6 +17,7 @@ import time
 import argparse
 import os
 import shutil
+import stat
 import subprocess
 import ctypes
 from pathlib import Path
@@ -37,6 +38,150 @@ sys.path.pop(0)
 
 _ROOT_DIR = Path(__file__).resolve().parent
 _PATCH_BIN_RELPATH = Path('third_party/git/usr/bin/patch.exe')
+
+
+def _rmtree_clear_readonly(func, path, exc_info):
+    """shutil.rmtree onexc handler: CIPD/npm mark some installed files
+    read-only on Windows, which makes os.unlink/os.rmdir fail. Clear the
+    read-only attribute and retry once."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def rmtree(path):
+    shutil.rmtree(path, onexc=_rmtree_clear_readonly)
+
+
+def _clear_readonly_tree(path):
+    """CIPD/npm mark some installed files read-only on Windows, which makes
+    `git clean` (run by clone.py) fail with 'Directory not empty' instead of
+    actually removing them. Proactively clear the read-only attribute across
+    the whole tree before clean runs, so it can delete everything itself.
+    Best-effort: a file this account has no access to at all (not just
+    read-only) is logged and left for the normal error to surface."""
+    if not path.exists():
+        return
+    for root, dirs, files in os.walk(path):
+        for name in dirs + files:
+            entry = Path(root) / name
+            try:
+                os.chmod(entry, stat.S_IWRITE)
+            except OSError as exc:
+                get_logger().warning('Could not clear read-only attribute on %s: %s', entry, exc)
+
+
+# rust-toolchain and llvm-build (clang) each carry their own version stamp
+# and skip re-downloading (multiple GB) when it already matches -- but
+# clone.py's `git reset --hard` + `git clean -ffdx` wipes them every build,
+# since they're untracked DEPS output, not excluded like uc_staging is.
+_TOOLCHAIN_CACHE_DIRS = (
+    Path('third_party/rust-toolchain'),
+    Path('third_party/llvm-build/Release+Asserts'),
+)
+
+
+def _stash_toolchain_caches(source_tree, cache_root):
+    """Move the toolchain directories out of source_tree before clone.py's
+    git clean runs, so it can't touch them."""
+    for rel_dir in _TOOLCHAIN_CACHE_DIRS:
+        src = source_tree / rel_dir
+        if not src.exists():
+            continue
+        dest = cache_root / rel_dir
+        if dest.exists():
+            rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+
+
+def _restore_toolchain_caches(source_tree, cache_root):
+    """Move the toolchain directories back after clone.py finishes, before
+    update_rust.py/update.py run. If the toolchain revision Chromium's DEPS
+    asks for hasn't changed, their own stamp check skips the download; if it
+    has, they detect the mismatch and re-download as normal."""
+    for rel_dir in _TOOLCHAIN_CACHE_DIRS:
+        src = cache_root / rel_dir
+        if not src.exists():
+            continue
+        dest = source_tree / rel_dir
+        if dest.exists():
+            rmtree(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+
+
+def _clear_stale_extraction_staging(download_info, components, output_dir):
+    """Extractors that can't tell 7z to strip the archive's leading directory
+    themselves unpack into a temporary `<output_path>/<strip_leading_dirs>`
+    staging directory, then move its contents up into <output_path> one file
+    at a time and remove it. If a previous build was interrupted mid-move,
+    the staging directory can be left behind with only some of its files
+    moved out -- and since <output_path> then already has the rest, even a
+    fresh extraction attempt fails the same way, file by file. This is all
+    in DEPS-downloaded, git-untracked third_party paths that `git clean`
+    never touches, so it doesn't get cleared on its own.
+
+    Clear the whole <output_path> destination (not just the staging
+    directory) before extracting, so every attempt starts from an empty
+    directory and can't collide with anything. These are small,
+    quick-to-re-extract packages (headers, small tools), so re-extracting
+    them unconditionally on every build is cheap."""
+    for download_name, download_properties in download_info.properties_iter():
+        if components and download_name not in components:
+            continue
+        if download_properties.strip_leading_dirs is None:
+            continue
+        destination = output_dir / Path(download_properties.output_path)
+        if destination.exists():
+            get_logger().warning('Clearing extraction destination before unpacking: %s',
+                                 destination)
+            rmtree(destination)
+            destination.mkdir(parents=True)
+
+
+def _unpack_downloads_resilient(download_info, cache_dir, components, output_dir, extractors,
+                                max_attempts=10):
+    """Stale extraction leftovers from an interrupted previous build (in
+    DEPS-downloaded third_party directories that `git clean` never touches,
+    since they aren't tracked by git) can make extraction fail with
+    FileExistsError, either because a leftover staging directory blocks a
+    fresh extraction (see _clear_stale_extraction_staging) or because moving
+    a file out of that staging directory collides with one already at the
+    destination. Clear whatever's blocking it and retry."""
+    for attempt in range(1, max_attempts + 1):
+        # A prior attempt in this same retry loop can die partway through
+        # _process_relative_to(), leaving that component's staging directory
+        # behind with only some of its files moved out. Since the next
+        # attempt reprocesses every component from scratch, that leftover
+        # staging directory trips the "already exists" precheck even though
+        # nothing outside this loop is stale. Clear it before every attempt,
+        # not just the first.
+        _clear_stale_extraction_staging(download_info, components, output_dir)
+        try:
+            downloads.unpack_downloads(download_info, cache_dir, components, output_dir,
+                                       extractors)
+            return
+        except FileExistsError as exc:
+            if attempt == max_attempts:
+                raise
+            blocking_path = exc.filename2 or exc.filename
+            if blocking_path:
+                get_logger().warning(
+                    'Extraction hit a stale leftover at %s (attempt %d/%d); removing it and '
+                    'retrying.', blocking_path, attempt, max_attempts)
+                blocking_path = Path(blocking_path)
+                if blocking_path.is_dir():
+                    rmtree(blocking_path)
+                else:
+                    blocking_path.unlink(missing_ok=True)
+            else:
+                # A bare FileExistsError (no filename attached) is the
+                # extractors' own "temporary unpacking directory already
+                # exists" precheck; _clear_stale_extraction_staging() at the
+                # top of the next attempt clears whatever tripped it.
+                get_logger().warning(
+                    'Extraction hit a stale unpacking directory (attempt %d/%d); retrying.',
+                    attempt, max_attempts)
 
 
 def _get_vcvars_path(name='64'):
@@ -171,6 +316,7 @@ def main():
     # Set common variables
     source_tree = _ROOT_DIR / 'build' / 'src'
     downloads_cache = _ROOT_DIR / 'build' / 'download_cache'
+    toolchain_cache = _ROOT_DIR / 'build' / 'toolchain_cache'
     if os.environ.get('SISO_REAPI_ADDRESS'):
         os.environ['RBE_service_no_security'] = 'true'
 
@@ -200,10 +346,15 @@ def main():
 
             # Unpack chromium tarball
             get_logger().info('Unpacking chromium tarball...')
-            downloads.unpack_downloads(download_info, downloads_cache, None, source_tree, extractors)
+            _unpack_downloads_resilient(download_info, downloads_cache, None, source_tree, extractors)
         else:
-            # Clone sources
+            # Clone sources. clone.py runs `git clean -ffdx`, which can fail if
+            # CIPD/npm left read-only files behind from a previous run, and
+            # would otherwise wipe the rust/clang toolchains every time.
+            _clear_readonly_tree(source_tree)
+            _stash_toolchain_caches(source_tree, toolchain_cache)
             subprocess.run([sys.executable, str(Path('helium-chromium', 'utils', 'clone.py')), '-o', 'build\\src', '-p', 'win-arm64' if args.arm else 'win64'], check=True)
+            _restore_toolchain_caches(source_tree, toolchain_cache)
 
         # Retrieve windows downloads
         get_logger().info('Downloading required files...')
@@ -228,7 +379,7 @@ def main():
             get_logger().error('File checksum does not match: %s', exc)
             exit(1)
         get_logger().info('Unpacking deps...')
-        downloads.unpack_downloads(deps_info, downloads_cache, None, source_tree, extractors)
+        _unpack_downloads_resilient(deps_info, downloads_cache, None, source_tree, extractors)
 
 
         # Prune binaries
@@ -245,13 +396,13 @@ def main():
         DIRECTX = source_tree / 'third_party' / 'microsoft_dxheaders' / 'src'
         ESBUILD = source_tree / 'third_party' / 'devtools-frontend' / 'src' / 'third_party' / 'esbuild'
         if DIRECTX.exists():
-            shutil.rmtree(DIRECTX)
+            rmtree(DIRECTX)
             DIRECTX.mkdir()
         if ESBUILD.exists():
-            shutil.rmtree(ESBUILD)
+            rmtree(ESBUILD)
             ESBUILD.mkdir()
         get_logger().info('Unpacking downloads...')
-        downloads.unpack_downloads(download_info_win, downloads_cache, components, source_tree, extractors)
+        _unpack_downloads_resilient(download_info_win, downloads_cache, components, source_tree, extractors)
 
         cipd_cache = downloads_cache / 'cipd'
         cipd_cache.mkdir(exist_ok=True)

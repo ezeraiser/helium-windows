@@ -6,6 +6,36 @@ runs:
     - name: Record job start
       shell: pwsh
       run: '"HELIUM_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV'
+    - name: Free disk space
+      shell: pwsh
+      run: |
+        Write-Host "=== Before cleanup ==="
+        Get-PSDrive C | Select-Object Used, Free
+
+        # Unused hosted-tool SDKs the Chromium build never touches. Left alone:
+        # Python/Node.js under hostedtoolcache (needed by our own setup steps below)
+        # and the Windows SDK / MSVC toolchain (needed by the build itself).
+        $dirs = @(
+          "C:\Program Files\Android",
+          "C:\Program Files (x86)\Android",
+          "C:\Android",
+          "C:\Program Files\dotnet",
+          "C:\Program Files\Java",
+          "C:\hostedtoolcache\windows\Java_Temurin-Hotspot",
+          "C:\hostedtoolcache\windows\Ruby",
+          "C:\hostedtoolcache\windows\go",
+          "C:\ProgramData\chocolatey\lib"
+        )
+        foreach ($dir in $dirs) {
+          if (Test-Path $dir) {
+            Write-Host "Removing: $dir"
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dir
+          }
+        }
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:TEMP\*"
+
+        Write-Host "=== After cleanup ==="
+        Get-PSDrive C | Select-Object Used, Free
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
