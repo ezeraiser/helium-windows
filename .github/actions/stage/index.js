@@ -7,6 +7,20 @@ const glob = require('@actions/glob');
 const path = require('path');
 const os = require('os');
 
+async function logDiskSpace(label) {
+    try {
+        const { stdout } = await exec.getExecOutput('powershell', [
+            '-NoProfile',
+            '-Command', 
+            'Get-PSDrive C | Select-Object @{N="Used(GB)";E={[math]::Round($_.Used/1GB,2)}}, @{N="Free(GB)";E={[math]::Round($_.Free/1GB,2)}} | Format-Table -AutoSize'
+        ], { silent: true });
+        console.log(`\n=== Disk space: ${label} ===`);
+        console.log(stdout);
+    } catch (e) {
+        console.log(`Warning: Could not log disk space: ${e.message}`);
+    }
+}
+
 async function run() {
     const started_at = Number(process.env.HELIUM_JOB_STARTED_AT) || Math.floor(Date.now() / 1000);
 
@@ -20,19 +34,42 @@ async function run() {
 
     const artifact = new DefaultArtifactClient();
     const artifactName = arm ? 'build-artifact-arm64' : 'build-artifact-x86_64';
+    
     if (from_artifact && !upload_final) {
+        await logDiskSpace('Before artifact download');
+        
         const artifactInfo = await artifact.getArtifact(artifactName);
         await artifact.downloadArtifact(artifactInfo.artifact.id, {path: 'C:\\helium-windows\\build'});
-        await exec.exec('7z', ['x', 'C:\\helium-windows\\build\\artifacts.zip',
-            '-oC:\\helium-windows\\build', '-y']);
-        await io.rmRF('C:\\helium-windows\\build\\artifacts.zip');
+        
+        await logDiskSpace('After artifact download (ZIP still present)');
+        
+        const zipPath = 'C:\\helium-windows\\build\\artifacts.zip';
+        
+        // Extract ZIP
+        console.log('Extracting artifacts.zip...');
+        await exec.exec('7z', ['x', zipPath, '-oC:\\helium-windows\\build', '-y']);
+        
+        await logDiskSpace('After ZIP extraction (ZIP still present)');
+        
+        // Delete ZIP immediately after extraction - CRITICAL for disk space
+        console.log('Deleting artifacts.zip immediately after extraction...');
+        await io.rmRF(zipPath);
+        
+        await logDiskSpace('After deleting artifacts.zip');
+        
         // The extracted tree lands uncompressed; shrink it in place before the build resumes.
+        console.log('Applying NTFS compression to build directory...');
         await exec.exec('compact', ['/c', '/s:C:\\helium-windows\\build', '/i'], {ignoreReturnCode: true});
+        
+        await logDiskSpace('After NTFS compression of build directory');
+        
     } else if (!upload_final) {
         // Mark the (still empty) build dir compressed so everything build.py writes into it
         // inherits NTFS compression automatically, with no retroactive scan needed.
         await io.mkdirP('C:\\helium-windows\\build');
         await exec.exec('compact', ['/c', 'C:\\helium-windows\\build'], {ignoreReturnCode: true});
+        
+        await logDiskSpace('After marking build directory for compression');
     }
 
     const args = ['build.py', '--ci', String(started_at)]
@@ -54,6 +91,9 @@ async function run() {
         let packageList = await globber.glob();
         const finalArtifactName = arm ? 'helium-arm64' : 'helium-x86_64';
         const maxUploadAttempts = 5;
+        
+        await logDiskSpace('Before final artifact upload');
+        
         for (let attempt = 1; attempt <= maxUploadAttempts; ++attempt) {
             try {
                 await artifact.deleteArtifact(finalArtifactName);
@@ -89,10 +129,15 @@ async function run() {
         cwd: 'C:\\helium-windows',
         ignoreReturnCode: true
     });
+    
+    await logDiskSpace('Before build.py');
+    
     const retCode = await exec.exec('python', args, {
         cwd: 'C:\\helium-windows',
         ignoreReturnCode: true
     });
+
+    await logDiskSpace('After build.py completed');
 
     if (retCode > 0 && retCode !== 42) {
         throw `Unexpected return code: ${retCode}`
@@ -105,8 +150,14 @@ async function run() {
     core.setOutput('package_here', package_here);
 
     if (!package_here && core.getBooleanInput('save_artifact')) {
+        await logDiskSpace('Before creating artifacts.zip');
+        
+        console.log('Creating artifacts.zip...');
         await exec.exec('7z', ['a', '-tzip', 'C:\\helium-windows\\artifacts.zip',
             'C:\\helium-windows\\build\\src', '-mx=3', '-mtc=on'], {ignoreReturnCode: true});
+        
+        await logDiskSpace('After creating artifacts.zip');
+        
         for (let i = 0; i < 5; ++i) {
             try {
                 await artifact.deleteArtifact(artifactName);
@@ -114,8 +165,15 @@ async function run() {
                 // ignored
             }
             try {
+                console.log(`Uploading artifact (attempt ${i + 1}/5)...`);
                 await artifact.uploadArtifact(artifactName, ['C:\\helium-windows\\artifacts.zip'],
                     'C:\\helium-windows', { retentionDays: 4, compressionLevel: 0 });
+                
+                // After successful upload, delete the ZIP
+                console.log('Deleting artifacts.zip after successful upload...');
+                await io.rmRF('C:\\helium-windows\\artifacts.zip');
+                
+                await logDiskSpace('After uploading and deleting artifacts.zip');
                 break;
             } catch (e) {
                 console.error(`Upload artifact failed: ${e}`);
