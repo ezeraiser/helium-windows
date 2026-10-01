@@ -36,35 +36,6 @@ runs:
 
         Write-Host "=== After cleanup ==="
         Get-PSDrive C | Select-Object Used, Free
-    - name: Reduce pagefile size
-      shell: pwsh
-      run: |
-        Write-Host "=== Reducing pagefile size ==="
-        try {
-          wmic pagefileset where name="C:\\pagefile.sys" set InitialSize=100,MaximumSize=200 | Out-Null
-          Write-Host "Pagefile reduced to 100-200 MB" -ForegroundColor Green
-        } catch {
-          Write-Host "Warning: Could not modify pagefile: $_" -ForegroundColor Yellow
-        }
-        Get-PSDrive C | Select-Object Used, Free
-    - name: Disable System Restore and clear shadow copies
-      shell: pwsh
-      run: |
-        Write-Host "=== Disabling System Restore and clearing shadow copies ==="
-        try {
-          Disable-ComputerRestore -Drive "C:\" -ErrorAction SilentlyContinue
-          Write-Host "System Restore disabled" -ForegroundColor Green
-        } catch {
-          Write-Host "Warning: Could not disable System Restore: $_" -ForegroundColor Yellow
-        }
-        
-        try {
-          vssadmin delete shadows /all /quiet 2>$null
-          Write-Host "Shadow copies cleared" -ForegroundColor Green
-        } catch {
-          Write-Host "Warning: Could not clear shadow copies: $_" -ForegroundColor Yellow
-        }
-        Get-PSDrive C | Select-Object Used, Free
     - name: Clean temp and system temp directories
       shell: pwsh
       run: |
