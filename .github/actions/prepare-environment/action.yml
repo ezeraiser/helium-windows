@@ -47,9 +47,32 @@ runs:
         Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2370315' -OutFile "$env:RUNNER_TEMP\winsdksetup.exe"
         $installer = Start-Process "$env:RUNNER_TEMP\winsdksetup.exe" -ArgumentList '/quiet', '/norestart', '/features', '+' -Wait -PassThru
         if ($installer.ExitCode -notin @(0, 3010)) { throw "Windows SDK installation failed: $($installer.ExitCode)" }
+    - name: Cleanup SDK installer
+      shell: pwsh
+      run: |
+        Write-Host "Cleaning up Windows SDK installer"
+        Remove-Item -Force -ErrorAction SilentlyContinue "$env:RUNNER_TEMP\winsdksetup.exe"
+        Write-Host "=== After SDK installer cleanup ==="
+        Get-PSDrive C | Select-Object Used, Free
     - name: Init
       shell: pwsh
-      run: Copy-Item -Path . -Destination "C:\helium-windows" -Recurse
+      run: |
+        if (Test-Path "C:\helium-windows") {
+          Remove-Item "C:\helium-windows" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Copy-Item -Path . -Destination "C:\helium-windows" -Recurse
+    - name: Cleanup workspace copy after init
+      shell: pwsh
+      run: |
+        Write-Host "Cleaning up GitHub workspace after copying to C:\helium-windows"
+        # Remove the duplicate checkout in workspace since we now have C:\helium-windows
+        if ("$env:GITHUB_WORKSPACE" -ne "C:\helium-windows") {
+          Get-ChildItem "$env:GITHUB_WORKSPACE" -Force -Recurse -ErrorAction SilentlyContinue | 
+            Where-Object { -not ($_.PSPath -like "*\.git*") } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "=== After workspace cleanup ==="
+        Get-PSDrive C | Select-Object Used, Free
     - name: Set up Node.js 24
       uses: actions/setup-node@v4
       with:
