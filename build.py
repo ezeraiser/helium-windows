@@ -110,6 +110,68 @@ def _restore_toolchain_caches(source_tree, cache_root):
         shutil.move(str(src), str(dest))
 
 
+_PREPARE_FINGERPRINT_INPUTS = (
+    Path('helium-chromium/chromium_version.txt'),
+    Path('helium-chromium/pruning.list'),
+    Path('helium-chromium/domain_substitution.list'),
+    Path('helium-chromium/domain_regex.list'),
+    Path('helium-chromium/deps.ini'),
+    Path('helium-chromium/downloads.ini'),
+    Path('helium-chromium/flags.gn'),
+    Path('helium-chromium/resources/generate_resources.txt'),
+    Path('helium-chromium/resources/helium_resources.txt'),
+    Path('downloads.ini'),
+    Path('flags.windows.gn'),
+    Path('resources/generate_resources.txt'),
+    Path('resources/platform_resources.txt'),
+)
+
+
+def _compute_prepare_fingerprint(root_dir, args):
+    """Hash everything that feeds into the clone/download/patch/prune/
+    substitution steps below, so a local (non-CI) run can tell whether that
+    whole multi-minute (and mtime-touching, incremental-build-defeating)
+    sequence actually needs to happen again, or whether the last prepared
+    source_tree is still current.
+
+    Deliberately narrow: it covers patches/series (and every patch file they
+    list, in order) plus the small set of list/ini/gn files that drive
+    pruning, domain/name substitution and resource generation. It does not
+    walk the full resources/ directory tree, so a change to a resource file
+    that isn't also reflected in one of the *_resources.txt manifests won't
+    be picked up -- edit chromium_version.txt (or delete build/src) to force
+    a re-prepare if that ever matters.
+    """
+    import hashlib
+    hasher = hashlib.sha256()
+
+    def add_bytes(data):
+        hasher.update(len(data).to_bytes(8, 'little'))
+        hasher.update(data)
+
+    def add_file(path):
+        add_bytes(path.read_bytes() if path.exists() else b'<missing>')
+
+    # Deliberately excludes args.dev: --dev only changes GN args (component
+    # build, PGO, optimize_webui) and whether domain/name substitution + i18n
+    # run, not the clone/patch/prune steps themselves. A tree already fully
+    # prepared by a normal run is perfectly valid to reuse for a --dev run
+    # (see the separate "tree_has_substitution" check in main() for the one
+    # case -- a dev-raw tree being mistaken for a fully substituted one --
+    # this fingerprint alone can't catch).
+    add_bytes(f'arm={args.arm};tarball={args.tarball}'.encode(ENCODING))
+
+    for series_dir in (root_dir / 'helium-chromium' / 'patches', root_dir / 'patches'):
+        add_file(series_dir / 'series')
+        for patch_path in patches.generate_patches_from_series(series_dir, resolve=True):
+            add_file(patch_path)
+
+    for rel_path in _PREPARE_FINGERPRINT_INPUTS:
+        add_file(root_dir / rel_path)
+
+    return hasher.hexdigest()
+
+
 def _clear_stale_extraction_staging(download_info, components, output_dir):
     """Extractors that can't tell 7z to strip the archive's leading directory
     themselves unpack into a temporary `<output_path>/<strip_leading_dirs>`
@@ -320,7 +382,36 @@ def main():
     if os.environ.get('SISO_REAPI_ADDRESS'):
         os.environ['RBE_service_no_security'] = 'true'
 
-    if not args.ci or not (source_tree / 'BUILD.gn').exists():
+    # Local (non-CI) runs otherwise re-clone/re-patch the whole source tree on
+    # every invocation, rewriting the mtime of every patched file even when
+    # nothing actually changed -- which makes ninja/Siso treat most of the
+    # tree as dirty and rebuild far more than necessary. Skip the prepare
+    # block for local runs when BUILD.gn already exists and the fingerprint
+    # of everything that feeds it (patches, chromium_version, etc.) matches
+    # what produced the current source_tree.
+    prepare_fingerprint_path = downloads_cache / 'prepare_fingerprint.txt'
+    current_fingerprint = None
+    if not args.ci:
+        current_fingerprint = _compute_prepare_fingerprint(_ROOT_DIR, args)
+        stored_fingerprint = None
+        stored_tree_is_dev_raw = True  # unknown marker => assume the worst
+        if prepare_fingerprint_path.exists():
+            marker_lines = prepare_fingerprint_path.read_text(encoding=ENCODING).splitlines()
+            stored_fingerprint = marker_lines[0] if marker_lines else None
+            stored_tree_is_dev_raw = len(marker_lines) > 1 and marker_lines[1] == 'dev=True'
+        need_prepare = (
+            not (source_tree / 'BUILD.gn').exists()
+            or current_fingerprint != stored_fingerprint
+            # A --dev prepare skips domain/name substitution + i18n for
+            # speed, so that tree is missing steps a normal build needs --
+            # never silently reuse it for a non-dev run, even though the
+            # patch/chromium_version fingerprint alone matches.
+            or (not args.dev and stored_tree_is_dev_raw)
+        )
+    else:
+        need_prepare = not (source_tree / 'BUILD.gn').exists()
+
+    if need_prepare:
         # Setup environment
         source_tree.mkdir(parents=True, exist_ok=True)
         downloads_cache.mkdir(parents=True, exist_ok=True)
@@ -423,24 +514,19 @@ def main():
             shutil.copyfile(siso_backend_dir / 'google.star',
                             siso_backend_dir / 'backend.star')
 
-        if not args.dev:
-            # Apply patches
-            # First, ungoogled-chromium-patches
-            patches.apply_patches(
-                patches.generate_patches_from_series(_ROOT_DIR / 'helium-chromium' / 'patches', resolve=True),
-                source_tree,
-                patch_bin_path=(source_tree / _PATCH_BIN_RELPATH)
-            )
-            # Then Windows-specific patches
-            patches.apply_patches(
-                patches.generate_patches_from_series(_ROOT_DIR / 'patches', resolve=True),
-                source_tree,
-                patch_bin_path=(source_tree / _PATCH_BIN_RELPATH)
-            )
-
-        else:
-            print("Apply patches using quilt, then press Enter")
-            input()
+        # Apply patches
+        # First, ungoogled-chromium-patches
+        patches.apply_patches(
+            patches.generate_patches_from_series(_ROOT_DIR / 'helium-chromium' / 'patches', resolve=True),
+            source_tree,
+            patch_bin_path=(source_tree / _PATCH_BIN_RELPATH)
+        )
+        # Then Windows-specific patches
+        patches.apply_patches(
+            patches.generate_patches_from_series(_ROOT_DIR / 'patches', resolve=True),
+            source_tree,
+            patch_bin_path=(source_tree / _PATCH_BIN_RELPATH)
+        )
 
         # Download toolchains after the Windows extraction patch, before domain
         # substitution rewrites the download URL shared by Rust and Clang.
@@ -509,6 +595,16 @@ def main():
 
         _configure_remoteexec(source_tree)
 
+        if not args.ci:
+            downloads_cache.mkdir(parents=True, exist_ok=True)
+            prepare_fingerprint_path.write_text(
+                f'{current_fingerprint}\ndev={args.dev}\n', encoding=ENCODING)
+    elif not args.ci:
+        get_logger().info(
+            'Source tree already prepared and unchanged since (patches, '
+            'chromium_version.txt, etc. all match) -- skipping clone/'
+            'download/patch/prune/substitution.')
+
     clang_format = shutil.which('clang-format')
     if not clang_format:
         parser.error('clang-format not found on PATH; run python -m pip install clang-format')
@@ -538,6 +634,21 @@ def main():
         gn_flags += windows_flags
         if args.dev:
             gn_flags += 'is_component_build=true\n'
+            # chrome://settings and friends otherwise default optimize_webui
+            # to !is_debug (see ui/webui/webui_features.gni) -- since we keep
+            # is_debug=false even in --dev (a full debug build is far slower
+            # to compile/run), force it off explicitly so WebUI TS/HTML
+            # changes iterate as fast as the C++ side's component build does.
+            gn_flags += 'optimize_webui=false\n'
+            # build/config/pch.gni only enables precompiled headers when
+            # !is_official_build -- a --dev build is the first config on this
+            # toolchain to ever hit that path, and it triggers a clang error
+            # ("missing 'export module' declaration in module interface
+            # unit") compiling base/precompile.cc under our pinned
+            # bleeding-edge clang + /std:c++23preview. Disable PCH explicitly
+            # rather than chase that upstream clang issue; --dev's real speed
+            # win is the component build + unbundled WebUI above, not PCH.
+            gn_flags += 'enable_precompiled_headers=false\n'
         else:
             gn_flags += 'is_official_build=true\n'
 

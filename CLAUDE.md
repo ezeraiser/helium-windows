@@ -45,12 +45,110 @@ our own commits go to `ezeraiser/helium` and `ezeraiser/helium-windows`.
   (`helium.browser.vertical_expand_on_hover`) and wires it into
   `VerticalTabStripStateController`, whose expand-on-hover logic Helium's own
   `core.patch` had stubbed out (`SetExpandOnHoverEnabled` was a no-op) when it
-  moved vertical-tabs state onto its own `kHeliumLayout` pref.
-- **`disable-crashpad-engine.patch`** — Crashpad's handler process no longer
-  spawns by default (no background `--type=crashpad-handler` processes,
-  `CrashReporterClient` still gets registered so nothing else null-derefs).
-  Opt back in via `chrome://flags` → "Enable Crashpad crash reporting engine"
-  (Windows only).
+  moved vertical-tabs state onto its own `kHeliumLayout` pref. Also fixed to
+  react live: `kVerticalTabsCollapsedState` is otherwise only consulted at
+  window creation (see `BrowserWindowFeatures`), so a new
+  `pref_change_registrar_.Add()` + `OnCollapsedStatePrefChanged()` in
+  `VerticalTabStripStateController` calls `RequestCollapse()` so toggling
+  "Show sidebar as icons only" affects windows that are already open, not
+  just the next new one. Also fixed to actually persist across a full
+  restart when *On Startup* is set to "Continue where you left off": native
+  `kVerticalTabsCollapsedState` is documented upstream as "only used during
+  startup when session restore is not used", and
+  `browser_window_features.cc` only falls back to reading it when
+  `!browser->CreatedBySessionRestore()` -- with session restore on (common
+  setting), that branch never runs, `restored_state_collapsed` stays
+  `nullopt`, and the constructor never consults the pref at all, so the
+  Settings toggle silently has no effect on relaunch even though it's
+  written to disk correctly (confirmed via the on-disk `Preferences` file:
+  the value is really there, just never read back). Fixed by having
+  `VerticalTabStripStateController`'s constructor fall back to
+  `pref_service_->GetBoolean(prefs::kVerticalTabsCollapsedState)` itself
+  whenever `restored_state_collapsed` arrives empty, instead of touching the
+  shared upstream `browser_window_features.cc` fallback condition. **When
+  testing any "persists across restart" claim for a vertical-tab-strip
+  setting, test with *On Startup* = "Continue where you left off" (not just
+  "Open the New Tab page") -- the two startup modes exercise genuinely
+  different initial-state code paths, and a setting can work perfectly in
+  one and be silently inert in the other.** The same session-restore gap
+  existed for `kVerticalTabsUncollapsedWidth` ("restores last size") --
+  fixed the same way, but note the fallback there is applied
+  *unconditionally* (not just when the incoming value is empty): unlike
+  collapsed state, `BrowserInitState`'s width field doesn't reliably stay
+  `nullopt` across a session-restored launch. **When restoring more than one
+  coupled pref in a constructor, read every pref into a local first, then
+  apply all of them -- don't read-and-apply one before reading the next.**
+  `VerticalTabStripStateController::UpdatePrefService()` writes
+  `kVerticalTabsCollapsedState` and `kVerticalTabsUncollapsedWidth`
+  *together* from whatever is currently in `state_` any time either one
+  changes (via `NotifyCollapseChanged()`); applying the collapsed value
+  first, while the width field was still sitting at its struct default,
+  wrote that stale default width to the pref as a side effect -- and then
+  immediately reading the width pref back in picked up that very value this
+  same constructor had just corrupted, discarding whatever was really
+  persisted from last session.
+  Also added: a "Delay" dropdown next to "Expand on hover" (new integer pref
+  `helium.browser.vertical_expand_on_hover_delay_ms`, default 100ms, read via
+  `VerticalTabStripStateController::GetExpandOnHoverDelay()` in place of the
+  upstream `kVerticalTabsExpandOnHoverDelay` FeatureParam), and a genuine
+  hover-to-expand implementation (see below) -- the toggle existed before but
+  nothing made hovering actually show anything.
+  Finally, "disabled while Frameless/Zen mode is active" is now enforced in
+  C++, not just the Settings UI: `IsExpandOnHoverEnabled()` and
+  `OnCollapsedStatePrefChanged()` both bail out when `kHeliumZenMode` is set
+  (mirroring `appearance_page.ts`'s `ezerVerticalCollapseSettingsDisabled_`/
+  `ezerVerticalExpandOnHoverDisabled_`), and the Settings page itself now
+  force-writes both prefs to `false` the moment Zen mode turns on
+  (`ezerVerticalCollapseSettingsZenModeChanged_` in `appearance_page.ts`) --
+  previously the toggles were merely greyed out while still showing
+  whatever state they'd been left in, which looked stuck/broken rather than
+  off.
+- **Hover-to-expand is a from-scratch overlay, not a restored feature.**
+  Helium's own `helium/ui/layout/vertical.patch` deleted
+  `VerticalTabStripTopContainer` (and its `SetToolbarHeightForLayout`/
+  `SetCaptionButtonWidthForLayout`/`SetIsExitingExpandOnHoverForLayout`/
+  `SetTransitionButtonOpacity` plumbing) from `VerticalTabStripRegionView`'s
+  constructor entirely when the collapse button moved into the toolbar
+  (`toolbar_view.cc`'s `vertical_tabs_collapse_button_`) -- the native
+  "expand a collapsed vertical tab strip on hover" animation machinery
+  (`TabStripAnimations::kExpandOnHover`/`kTabStripHoverWidth`, still present
+  and still correctly *computed* in `BrowserAnimationController`) was left
+  wired up to emit the right values, but nothing ever consumed
+  `kTabStripHoverWidth` to actually resize anything on screen -- it was
+  vestigial. Confirmed by diffing `vertical.patch`'s removed hunks: the
+  deleted container is the *only* thing that used to read that value, and
+  the class that implemented it is still compiled but never instantiated.
+  Don't try to resurrect `VerticalTabStripTopContainer` wholesale -- it
+  assumes an in-sidebar control row that the toolbar-button relocation made
+  obsolete. Instead, `BrowserViewTabbedLayoutImpl`'s vertical-tab-strip
+  bounds calculation (`chrome/browser/ui/views/frame/layout/
+  browser_view_tabbed_layout_impl.cc`) now adds a `hover_expand_extra_width`
+  term, computed from `kTabStripHoverWidth`'s current animated value,
+  *after* the real content-inset has already been computed from the
+  narrower (collapsed) width -- so the overlay visually grows the sidebar's
+  own view bounds over the content without reserving any extra content
+  space, matching the "doesn't shift contents" intent of the original
+  animation's own comments.
+  Separately, `kVerticalTabsExpandOnHoverUseVelocityHeuristic` (a
+  `features.cc` `BASE_FEATURE_PARAM`, upstream default `true`) makes
+  hover-expand require specific mouse *movement* samples toward the edge,
+  never a static hover-and-wait -- resting the cursor over an
+  already-collapsed icon (the obvious way to trigger it) generated no
+  further `OnMouseMoved` samples and so never re-evaluated the heuristic.
+  Overridden to `false` here so the simple delay-timer path
+  (`kVerticalTabsExpandOnHoverDelay`, now backed by the pref above) is what
+  actually runs.
+- **`disable-crashpad-engine.patch`** — Crashpad's handler process
+  unconditionally never spawns (`InitializeCrashReportingForProcess()`
+  returns right after registering `CrashReporterClient`, so nothing else
+  null-derefs, but never calls `InitializeCrashpadWithEmbeddedHandler`). No
+  user-facing toggle — deliberately simple, matching ungoogled-chromium's own
+  philosophy of just removing it rather than making it configurable. An
+  earlier version tried a `chrome://flags` opt-in switch
+  (`--enable-crashpad-engine`, checked via `GetCommandLineSwitch` on the raw
+  `::GetCommandLine()`); **this cannot work** and was removed — see "Why
+  chrome://flags can't control Crashpad" below before reintroducing anything
+  like it.
 - `helium/hop/disable-password-manager.patch` was **removed** from the Helium
   patch set (it force-disabled Password Manager via an opinionated policy
   provider).
@@ -78,6 +176,68 @@ original bug first:
   (sometimes a bare one with no filename, from the extractor's own
   "already exists" precheck). Cleared before every attempt, not just once.
 
+## Fast local iteration: the prepare-skip fingerprint and `--dev`
+
+`build.py` used to re-clone + re-apply every patch on **every** local
+invocation, regardless of whether anything actually changed — this rewrites
+every patched file's mtime, which makes ninja/Siso treat much of the tree as
+dirty and recompile far more than necessary. Two things now address this;
+follow them when the user mentions running (or wanting to run) `--dev`, or
+complains about slow repeated local builds:
+
+- **`_compute_prepare_fingerprint()`** hashes everything that feeds the
+  clone/download/patch/prune/domain-substitution block (both `patches/series`
+  files and every patch they list, `chromium_version.txt`, `pruning.list`,
+  `domain_substitution.list`, etc. — deliberately *not* `args.dev`, see
+  below). The hash is stored in `build/download_cache/prepare_fingerprint.txt`
+  (outside `build/src`, so it survives `git clean`) alongside which mode
+  (`dev=True`/`dev=False`) produced it. On a local run, that whole block is
+  skipped when `BUILD.gn` already exists and the fingerprint still matches.
+  **Editing any `patches/ezer/*.patch` file always invalidates this** and
+  triggers a full re-clone+re-apply (by design — there's no safe way to
+  reapply just the changed patch in a sequential/cumulative patch chain), so
+  this alone doesn't make patch-edit-and-rebuild loops fast.
+- **`--dev`** is the actual fast-iteration flag: it sets
+  `is_component_build=true` (small per-DLL relinks instead of relinking one
+  monolithic `chrome.dll`) and `optimize_webui=false` (Settings/WebUI
+  TypeScript compiles unbundled/unminified, per
+  `ui/webui/webui_features.gni`'s `optimize_webui = !is_debug` default) and
+  disables PGO (`chrome_pgo_phase=0`). Patches are applied automatically in
+  `--dev` too (an earlier version left this to a manual `quilt` prompt —
+  removed, since it didn't match this fork's patch-file-based workflow).
+  `args.dev` is deliberately excluded from the fingerprint hash: a tree
+  already fully prepared by a normal run is safe to reuse as-is for `--dev`
+  (no re-clone/re-patch needed, just different GN args + a ninja run — the
+  first `--dev` run will still recompile a lot, because switching
+  component/non-component build is a large one-time change, but it's a
+  compile, not a re-clone). The reverse direction is guarded explicitly: a
+  tree prepared *with* `--dev` skipped domain/name substitution + i18n (see
+  the `if not args.dev:` guard around those steps), so `need_prepare` forces
+  a real re-prepare if a later **non**-`--dev` run would otherwise have
+  reused that incomplete tree.
+
+**The actual fast local workflow to suggest:**
+1. First do one full normal build (`python build.py`), so `build/src` is
+   patched, domain/name-substituted, and translated.
+2. `python build.py --dev` reuses that same tree (no re-clone/re-patch) and
+   just switches GN args to the fast-iteration config. Expect one large
+   compile on this first `--dev` run (component-build switch), then fast
+   incremental builds after.
+3. For actual patch logic changes, **edit the file directly under
+   `build/src/...`, not the `.patch` file** — this doesn't touch the
+   fingerprint, so `need_prepare` stays false and only the edited file (plus
+   dependents) recompiles. Use `third_party\depot_tools\autoninja.py -C
+   out\Default chrome` directly (skip `chromedriver`/`setup`/`mini_installer`)
+   for the fastest loop while just testing behavior.
+4. Once satisfied, port the change back into the real `.patch` file (see the
+   diff-reconstruction technique below) — a `build/src` edit that never makes
+   it into a `.patch` file is **not persisted**: the next full re-prepare
+   (any `patches/ezer/*.patch` edit, an imputnet sync, or switching away from
+   a dev-raw tree per the guard above) silently discards it.
+5. Do one final normal (non-`--dev`) build before treating anything as
+   release-ready — `--dev` skips domain/name substitution, i18n, PGO, and
+   uses a non-representative (component, unoptimized) binary layout.
+
 ## `check_ezer_patches.py`
 
 Run this after every imputnet sync (fetch + fast-forward/merge in
@@ -92,6 +252,34 @@ applies every *non*-`ezer` patch as a baseline, then strictly dry-run checks
 only `patches/ezer/*.patch`. Catches a broken ezer patch in minutes instead of
 after a multi-hour clone+build cycle. Requires `build/src` to already exist
 (run `build.py` at least once first).
+
+If you reach for this script's *technique* by hand -- rebuilding a
+"non-ezer-patches-only" baseline to diff a `build/src` with accumulated
+manual edits against (e.g. porting a day's worth of direct `build/src`
+changes back into a `.patch` file) -- three gotchas it doesn't handle for
+you:
+- Its own `git clean -ffdx` can die partway through with "Directory not
+  empty" on CIPD/npm's read-only files, same as `build.py`'s problem --
+  clear read-only attributes first (`_clear_readonly_tree()`'s approach) or
+  just retry the clean once; a second pass over already-partially-cleaned
+  dirs usually finishes with only harmless warnings about leftover
+  `third_party/node/node_modules/*` / `third_party/rust-toolchain/*`
+  subdirectories (unrelated to any `chrome/` source file).
+- `patches.apply_patches()` shells out to GNU `patch -d <tree> -i
+  <patch_file>`; `-d` changes directory *before* resolving `-i`, so a
+  relative patch path silently resolves against `<tree>` instead of your
+  cwd ("No such file or directory" for a file that definitely exists) --
+  always pass `.resolve()`d absolute paths for both.
+- A handful of non-ezer patches (`ungoogled-chromium/
+  fix-building-with-prunned-binaries.patch` and a few others) only apply
+  cleanly *after* `prune_binaries.prune_files()` has run with
+  `pruning.list` -- matching build.py's real order (download → prune →
+  patch). A handful of others fail regardless (devtools-frontend/puffin/
+  search-engine-data patches that depend on DEPS-downloaded content this
+  shortcut never unpacks) -- if a patch fails, check whether its hunks
+  actually land in any file you care about before worrying about it; the
+  ones that genuinely matter for `chrome/browser/ui/*` apply fine once
+  pruning has run.
 
 ## Hard-won rules for writing/editing `patches/ezer/*.patch`
 
@@ -135,6 +323,45 @@ locally is not proof it will pass CI. Specifically:
    +new_start,new_count`) against the actual `+`/`-`/` ` lines in the hunk —
    most of the failures in this history were simple count or line-number
    drift, not logic errors.
+
+## Why `chrome://flags` can't control Crashpad (or anything else in `chrome_elf`)
+
+On Windows, `chrome_elf.dll` initializes crash reporting
+(`ChromeCrashReporterClient::InitializeCrashReportingForProcess()`, called
+from `chrome_elf/crash/crash_helper.cc`) as part of the executable's own
+early load sequence — **before `chrome.dll` (and `ChromeMainDelegate`) even
+starts running**. `chrome://flags` selections are stored in Local State and
+only get turned into command-line-like switches on the in-memory
+`base::CommandLine::ForCurrentProcess()` object inside `chrome.dll`, during
+`ChromeMainDelegate`'s own startup — including after clicking chrome://flags'
+"Relaunch" button, which restarts the process but doesn't change this
+ordering. So:
+
+- Raw `::GetCommandLine()` (what `chrome_elf`-level code can see) **never**
+  reflects a `chrome://flags` choice, with or without relaunching — verified
+  empirically, not just in theory.
+- Child processes (renderer, GPU, utility) *do* get flag-derived switches on
+  their real OS-level command line, because the *browser process* explicitly
+  constructs their command lines after its own flags are applied. Only
+  `chrome_elf`-level code in the *initial* browser process launch is affected
+  by this timing gap.
+- This is also why real Chromium enterprise policies for crash
+  reporting/metrics are read from the **Windows registry**
+  (`install_static::ReportingIsEnforcedByPolicy()` in
+  `chrome/install_static/install_util.cc`, reading
+  `SOFTWARE\Policies\<company>\<product>\MetricsReportingEnabled` via the
+  `nt::` registry API in `chrome/chrome_elf/nt_registry/`, which works from
+  `chrome_elf`/`DllMain` context without depending on `advapi32` or
+  `base::CommandLine`) — not from a flag.
+
+**If a future feature needs a user-toggleable setting that affects
+`chrome_elf`-level code (anything gated before `ChromeMainDelegate` runs),
+don't use `chrome://flags`.** Use the registry instead: a Settings-page pref
++ a `PrefChangeRegistrar` observer (running later, in the already-started
+browser process) that mirrors the pref into a registry value via
+`nt::CreateRegKey`/a plain `RegSetValueExW` call, and have the early
+`chrome_elf`-level code read that same registry value directly (e.g. via
+`nt::QueryRegValueDWORD`) instead of any command-line switch.
 
 ## CI structure
 
