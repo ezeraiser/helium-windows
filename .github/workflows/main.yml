@@ -2,6 +2,13 @@ name: Build and release binaries
 on:
   workflow_dispatch:
     inputs:
+      arch:
+        required: true
+        type: choice
+        description: 'Select architecture to build'
+        options:
+          - x86_64
+          - arm64
       runner:
         required: false
         description: 'Runner image name'
@@ -17,11 +24,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
-    strategy:
-      matrix:
-        arch: [x86_64, arm64]
-      fail-fast: false
+    name: Build ${{ inputs.arch }}
     uses: ./.github/workflows/build-steps.yml
     secrets:
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -31,7 +34,7 @@ jobs:
       AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
       AZURE_SIGNING_CERTIFICATE_NAME: ${{ secrets.AZURE_SIGNING_CERTIFICATE_NAME }}
     with:
-      arch: ${{ matrix.arch }}
+      arch: ${{ inputs.arch }}
       runs-on: ${{ inputs.runner }}
 
   publish-release:
