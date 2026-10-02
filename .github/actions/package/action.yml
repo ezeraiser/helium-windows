@@ -1,5 +1,5 @@
 name: Package Windows release
-description: Finish the build, sign binaries, create and sign the installer, and upload packages
+description: Finish the build, sign binaries, create the portable ZIP, and upload it
 inputs:
   from_artifact:
     description: Restore the build tree from a previous job
@@ -65,9 +65,7 @@ runs:
       run: |
         nuget install Microsoft.ArtifactSigning.Client -Version 1.0.128 -ExcludeVersion -NonInteractive
         if ($LASTEXITCODE) { exit $LASTEXITCODE }
-        python -m pip install pywin32==311
-        if ($LASTEXITCODE) { exit $LASTEXITCODE }
-        python signing.py --arch $env:TARGET_ARCH --dlib Microsoft.ArtifactSigning.Client/bin/x64/Azure.CodeSigning.Dlib.dll
+        python signing.py --portable-only --arch $env:TARGET_ARCH --dlib Microsoft.ArtifactSigning.Client/bin/x64/Azure.CodeSigning.Dlib.dll
 
     - name: Upload artifacts
       id: stage3

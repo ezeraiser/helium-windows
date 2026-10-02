@@ -4,8 +4,39 @@ const exec = require('@actions/exec');
 const {DefaultArtifactClient} = require('@actions/artifact');
 const glob = require('@actions/glob');
 
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+const BUILD_DIR = 'C:\\helium-windows\\build';
+const SCRATCH_CANDIDATE = 'D:\\helium-scratch';
+const FALLBACK_SCRATCH = BUILD_DIR;
+// Headroom kept free on D: besides the archive itself.
+const SCRATCH_MARGIN_BYTES = 1024 ** 3;
+
+async function freeBytes(dir) {
+    const st = await fs.promises.statfs(dir);
+    return Number(st.bavail) * Number(st.bsize);
+}
+
+// The multi-GB artifacts.zip is parked on the runner's D: temp disk (when present and big
+// enough) so it doesn't share C: with the extracted build tree. Falls back to C: otherwise.
+async function pickScratchDir(neededBytes, label) {
+    try {
+        await fs.promises.access('D:\\');
+        const free = await freeBytes('D:\\');
+        const gb = b => (b / 1024 ** 3).toFixed(2);
+        console.log(`[${label}] D: free ${gb(free)} GB, need ${gb(neededBytes + SCRATCH_MARGIN_BYTES)} GB`);
+        if (free >= neededBytes + SCRATCH_MARGIN_BYTES) {
+            await io.mkdirP(SCRATCH_CANDIDATE);
+            return SCRATCH_CANDIDATE;
+        }
+        console.log(`[${label}] D: too small, falling back to C:`);
+    } catch (e) {
+        console.log(`[${label}] D: unavailable (${e.message}), falling back to C:`);
+    }
+    return FALLBACK_SCRATCH;
+}
 
 async function logDiskSpace(label) {
     try {
@@ -39,15 +70,24 @@ async function run() {
         await logDiskSpace('Before artifact download');
         
         const artifactInfo = await artifact.getArtifact(artifactName);
-        await artifact.downloadArtifact(artifactInfo.artifact.id, {path: 'C:\\helium-windows\\build'});
+        let scratchDir = await pickScratchDir(Number(artifactInfo.artifact.size) || 0, 'download');
+        try {
+            await artifact.downloadArtifact(artifactInfo.artifact.id, {path: scratchDir});
+        } catch (e) {
+            if (scratchDir === FALLBACK_SCRATCH) throw e;
+            console.log(`Download to ${scratchDir} failed (${e.message}), retrying on C:...`);
+            await io.rmRF(scratchDir);
+            scratchDir = FALLBACK_SCRATCH;
+            await artifact.downloadArtifact(artifactInfo.artifact.id, {path: scratchDir});
+        }
+
+        await logDiskSpace(`After artifact download (ZIP still present, in ${scratchDir})`);
         
-        await logDiskSpace('After artifact download (ZIP still present)');
-        
-        const zipPath = 'C:\\helium-windows\\build\\artifacts.zip';
+        const zipPath = path.join(scratchDir, 'artifacts.zip');
         
         // Extract ZIP
         console.log('Extracting artifacts.zip...');
-        await exec.exec('7z', ['x', zipPath, '-oC:\\helium-windows\\build', '-y']);
+        await exec.exec('7z', ['x', zipPath, `-o${BUILD_DIR}`, '-y']);
         
         await logDiskSpace('After ZIP extraction (ZIP still present)');
         
@@ -73,6 +113,8 @@ async function run() {
     }
 
     const args = ['build.py', '--ci', String(started_at)]
+    // CI only ships the portable ZIP, so skip the setup/mini_installer targets.
+    args.push('--portable-only')
     if (process.env.HELIUM_BUILD_JOBS) {
         args.push('-j', process.env.HELIUM_BUILD_JOBS);
     } else if (process.env.RUNNER_ENVIRONMENT === 'github-hosted') {
@@ -153,8 +195,19 @@ async function run() {
         await logDiskSpace('Before creating artifacts.zip');
         
         console.log('Creating artifacts.zip...');
-        await exec.exec('7z', ['a', '-tzip', 'C:\\helium-windows\\artifacts.zip',
-            'C:\\helium-windows\\build\\src', '-mx=3', '-mtc=on'], {ignoreReturnCode: true});
+        // Archive size isn't known up front; try D: when it has a reasonable amount of room,
+        // and redo it on C: if 7z fails there (e.g. the disk filled up).
+        let zipDir = await pickScratchDir(8 * 1024 ** 3, 'zip');
+        let zipPath = path.join(zipDir, 'artifacts.zip');
+        const zipArgs = out => ['a', '-tzip', out, 'C:\\helium-windows\\build\\src', '-mx=3', '-mtc=on'];
+        let zipCode = await exec.exec('7z', zipArgs(zipPath), {ignoreReturnCode: true});
+        if (zipCode > 0 && zipDir !== FALLBACK_SCRATCH) {
+            console.log(`7z failed on ${zipDir} (exit ${zipCode}), retrying on C:...`);
+            await io.rmRF(zipDir);
+            zipDir = FALLBACK_SCRATCH;
+            zipPath = path.join(zipDir, 'artifacts.zip');
+            await exec.exec('7z', zipArgs(zipPath), {ignoreReturnCode: true});
+        }
         
         await logDiskSpace('After creating artifacts.zip');
         
@@ -166,12 +219,12 @@ async function run() {
             }
             try {
                 console.log(`Uploading artifact (attempt ${i + 1}/5)...`);
-                await artifact.uploadArtifact(artifactName, ['C:\\helium-windows\\artifacts.zip'],
-                    'C:\\helium-windows', { retentionDays: 4, compressionLevel: 0 });
+                await artifact.uploadArtifact(artifactName, [zipPath],
+                    zipDir, { retentionDays: 4, compressionLevel: 0 });
                 
                 // After successful upload, delete the ZIP
                 console.log('Deleting artifacts.zip after successful upload...');
-                await io.rmRF('C:\\helium-windows\\artifacts.zip');
+                await io.rmRF(zipPath);
                 
                 await logDiskSpace('After uploading and deleting artifacts.zip');
                 break;

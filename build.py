@@ -373,6 +373,13 @@ def main():
         '--dev',
         action='store_true'
     )
+    parser.add_argument(
+        '--portable-only',
+        action='store_true',
+        help=('Build only what the portable ZIP needs (skips the setup and mini_installer '
+              'targets). Only changes the ninja targets, so it is not part of the '
+              'prepare fingerprint.')
+    )
     args = parser.parse_args()
 
     # Set common variables
@@ -680,7 +687,9 @@ def main():
 
     # Finish all release targets before signing. Siso can replace signed outputs
     # if it is invoked again to build their dependents (the mini installer).
-    ninja_commandline.extend(['chrome', 'chromedriver', 'setup', 'mini_installer'])
+    ninja_commandline.extend(['chrome', 'chromedriver'])
+    if not args.portable_only:
+        ninja_commandline.extend(['setup', 'mini_installer'])
 
     # Run ninja
     if args.ci:

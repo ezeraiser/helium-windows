@@ -65,12 +65,18 @@ def sign(files, description, args, metadata):
 def sign_staged_binaries(work, args, metadata):
     """Sign identical binaries once and copy the result to every package layout."""
     groups = {}
-    files = pe_files(work / 'portable') + pe_files(work / 'payload') + [work / 'setup.exe']
+    files = pe_files(work / 'portable')
+    if not args.portable_only:
+        files += pe_files(work / 'payload') + [work / 'setup.exe']
     for file in files:
         description = ('Helium Update Helper'
                        if file.name.lower() == 'helium_update_helper.exe' else 'Helium')
         groups.setdefault((description, package.digest(file)), []).append(file)
-    if {description for description, _ in groups} != {'Helium', 'Helium Update Helper'}:
+    found = {description for description, _ in groups}
+    if args.portable_only:
+        if 'Helium' not in found:
+            raise ValueError('Expected browser signing inputs')
+    elif found != {'Helium', 'Helium Update Helper'}:
         raise ValueError('Expected browser and updater helper signing inputs')
 
     for description in ('Helium', 'Helium Update Helper'):
@@ -90,6 +96,8 @@ def parse_args():
     parser.add_argument('--arch', choices=('x64', 'arm64'))
     parser.add_argument('--seven-zip', type=Path,
                         default=Path(shutil.which('7z') or 'C:/Program Files/7-Zip/7z.exe'))
+    parser.add_argument('--portable-only', action='store_true',
+                        help='Package only the portable ZIP (no NSIS/mini installer).')
     parser.add_argument('--no-sign', action='store_true',
                         help='Skip Azure code signing and produce unsigned packages.')
     args = parser.parse_args()
@@ -141,10 +149,18 @@ def write_signing_metadata(work):
 
 def main():
     args = parse_args()
-    work = package.stage_build(args.build_outputs, args.seven_zip, args.arch)
+    work = package.stage_build(args.build_outputs, args.seven_zip, args.arch,
+                               portable_only=args.portable_only)
     if args.sign:
         metadata = write_signing_metadata(work)
         sign_staged_binaries(work, args, metadata)
+
+    if args.portable_only:
+        expected = {'portable': package.inventory(work / 'portable')}
+        portable = package.build_portable_package(work)
+        package.verify_portable_package(portable, expected)
+        emit('artifacts', work / 'artifacts')
+        return
 
     # Snapshot the (possibly signed) inputs before packaging so verification
     # can detect changes.

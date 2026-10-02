@@ -70,24 +70,13 @@ def _build_nsis_installer(version, arch, build_outputs, output_file):
     subprocess.run(cmd, check=True)
 
 
-def create_packages(build_outputs, output_dir, cpu_arch='64bit', *, installer_inputs=None):
-    build_outputs = build_outputs.resolve()
-    installer_inputs = (installer_inputs or build_outputs).resolve()
-    output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+def _release_version():
     version_parts = helium_version.get_version_parts(_ROOT_DIR / 'helium-chromium', _ROOT_DIR)
-    version = f"{version_parts['HELIUM_MAJOR']}.{version_parts['HELIUM_MINOR']}." + \
-              f"{version_parts['HELIUM_PATCH']}.{version_parts['HELIUM_PLATFORM']}"
+    return f"{version_parts['HELIUM_MAJOR']}.{version_parts['HELIUM_MINOR']}." + \
+           f"{version_parts['HELIUM_PATCH']}.{version_parts['HELIUM_PLATFORM']}"
 
-    target_cpu = get_target_cpu(installer_inputs)
 
-    installer_output = output_dir / f'helium_{version}_{target_cpu}-installer.exe'
-    _build_nsis_installer(version, target_cpu, installer_inputs, installer_output)
-
-    mini_installer_output = output_dir / f'helium_{version}_{target_cpu}-mini-installer.exe'
-    shutil.copy2(installer_inputs / 'mini_installer.exe', mini_installer_output)
-
+def _create_portable_zip(build_outputs, output_dir, version, target_cpu, cpu_arch):
     timestamp = None
     try:
         with open(_BUILD_SRC / 'build/util/LASTCHANGE.committime', 'r') as ct:
@@ -99,6 +88,35 @@ def create_packages(build_outputs, output_dir, cpu_arch='64bit', *, installer_in
 
     filescfg.create_archive(
         portable_files(build_outputs, cpu_arch), tuple(), build_outputs, output, timestamp)
+    return output
+
+
+def create_portable_package(build_outputs, output_dir, cpu_arch='64bit', *, installer_inputs=None):
+    """Create only the portable ZIP (no NSIS/mini installer)."""
+    build_outputs = build_outputs.resolve()
+    installer_inputs = (installer_inputs or build_outputs).resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return _create_portable_zip(build_outputs, output_dir, _release_version(),
+                                get_target_cpu(installer_inputs), cpu_arch)
+
+
+def create_packages(build_outputs, output_dir, cpu_arch='64bit', *, installer_inputs=None):
+    build_outputs = build_outputs.resolve()
+    installer_inputs = (installer_inputs or build_outputs).resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    version = _release_version()
+    target_cpu = get_target_cpu(installer_inputs)
+
+    installer_output = output_dir / f'helium_{version}_{target_cpu}-installer.exe'
+    _build_nsis_installer(version, target_cpu, installer_inputs, installer_output)
+
+    mini_installer_output = output_dir / f'helium_{version}_{target_cpu}-mini-installer.exe'
+    shutil.copy2(installer_inputs / 'mini_installer.exe', mini_installer_output)
+
+    output = _create_portable_zip(build_outputs, output_dir, version, target_cpu, cpu_arch)
     return installer_output, mini_installer_output, output
 
 
@@ -125,7 +143,7 @@ def extract(seven_zip, archive, directory):
     subprocess.run([str(seven_zip), 'x', str(archive), f'-o{directory}', '-y'], check=True)
 
 
-def stage_build(build_outputs, seven_zip, arch=None):
+def stage_build(build_outputs, seven_zip, arch=None, portable_only=False):
     """Copy build outputs into a fresh directory before modifying them."""
     build_arch = get_target_cpu(build_outputs)
     if arch and arch != build_arch:
@@ -141,14 +159,25 @@ def stage_build(build_outputs, seven_zip, arch=None):
             shutil.copytree(src, dst, dirs_exist_ok=True)
         else:
             shutil.copy2(src, dst)
-    for name in ('setup.exe', 'args.gn'):
-        shutil.copy2(build_outputs / name, work / name)
-    shutil.copy2(build_outputs / 'mini_installer.exe', work / 'unsigned-mini-installer.exe')
-    extract(seven_zip, build_outputs / 'helium.7z', work / 'payload')
-    version = load_chromium_tool('create_installer_archive').BuildVersion()
-    for required in (portable / 'chrome.exe', portable / 'chrome.dll',
-                     work / 'payload/Helium-bin/chrome.exe',
-                     work / 'payload/Helium-bin' / version / 'chrome.dll'):
+    shutil.copy2(build_outputs / 'args.gn', work / 'args.gn')
+    required_files = [portable / 'chrome.exe', portable / 'chrome.dll']
+    if portable_only:
+        # filescfg's glob silently skips anything missing, so an incomplete build would
+        # otherwise yield a broken ZIP without any error. These are all produced by the
+        # `chrome` ninja target itself (chrome_initial deps/data_deps). helium_update_helper.exe
+        # is deliberately not required: updates are applied manually for portable builds.
+        required_files += [portable / name for name in (
+            'chrome_elf.dll', 'eventlog_provider.dll', 'notification_helper.exe',
+            'elevation_service.exe', 'chrome_proxy.exe', 'chrome_pwa_launcher.exe',
+            'resources.pak', 'icudtl.dat')]
+    else:
+        shutil.copy2(build_outputs / 'setup.exe', work / 'setup.exe')
+        shutil.copy2(build_outputs / 'mini_installer.exe', work / 'unsigned-mini-installer.exe')
+        extract(seven_zip, build_outputs / 'helium.7z', work / 'payload')
+        version = load_chromium_tool('create_installer_archive').BuildVersion()
+        required_files += [work / 'payload/Helium-bin/chrome.exe',
+                           work / 'payload/Helium-bin' / version / 'chrome.dll']
+    for required in required_files:
         if not required.is_file():
             raise FileNotFoundError(required)
 
@@ -233,6 +262,14 @@ def verify_portable_zip(portable, expected):
         check_equal(actual, expected['portable'], 'Portable ZIP')
 
 
+def build_portable_package(work):
+    """Create the portable ZIP from the staged (possibly signed) portable files."""
+    outputs = work / 'artifacts'
+    if outputs.exists():
+        raise FileExistsError(f'Release already packaged: {outputs}')
+    return create_portable_package(work / 'portable', outputs, installer_inputs=work)
+
+
 def verify_packages(work, seven_zip, nsis, mini, portable, expected):
     """Check that each release package contains the signed staging files."""
     expected = {**expected, 'archive': digest(work / 'helium.packed.7z')}
@@ -242,6 +279,11 @@ def verify_packages(work, seven_zip, nsis, mini, portable, expected):
         verify_nsis_installer(nsis, temp, seven_zip, expected)
         verify_portable_zip(portable, expected)
     print('Verified both installers and portable ZIP against the signed payloads.')
+
+
+def verify_portable_package(portable, expected):
+    verify_portable_zip(portable, expected)
+    print('Verified portable ZIP against the signed staging files.')
 
 
 def main():

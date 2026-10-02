@@ -24,11 +24,26 @@ runs:
           "C:\hostedtoolcache\windows\Java_Temurin-Hotspot",
           "C:\hostedtoolcache\windows\Ruby",
           "C:\hostedtoolcache\windows\go",
-          "C:\ProgramData\chocolatey\lib"
+          "C:\ProgramData\chocolatey\lib",
+          # Preinstalled runner software the build never uses. Chromium downloads its
+          # own clang/rust into third_party (see build.py), and clang-format comes from pip.
+          "C:\Program Files\LLVM",
+          "C:\Program Files\PostgreSQL",
+          "C:\Program Files\MongoDB",
+          "C:\Program Files\Microsoft SQL Server",
+          "C:\Program Files (x86)\Microsoft SQL Server",
+          "C:\Program Files\Mozilla Firefox",
+          "C:\Program Files\Google\Chrome",
+          "C:\Julia",
+          "C:\Strawberry",
+          "C:\Rtools",
+          "C:\SeleniumWebDrivers"
         )
         foreach ($dir in $dirs) {
           if (Test-Path $dir) {
-            Write-Host "Removing: $dir"
+            $sizeGB = [math]::Round((Get-ChildItem $dir -Recurse -Force -File -ErrorAction SilentlyContinue |
+              Measure-Object Length -Sum).Sum / 1GB, 2)
+            Write-Host "Removing: $dir ($sizeGB GB)"
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dir
           }
         }
@@ -52,19 +67,6 @@ runs:
           Write-Host "Cleaned $env:SystemRoot\Temp" -ForegroundColor Green
         } catch {
           Write-Host "Warning: Could not clean system temp: $_" -ForegroundColor Yellow
-        }
-        Get-PSDrive C | Select-Object Used, Free
-    - name: DISM Component Store Cleanup
-      shell: pwsh
-      run: |
-        Write-Host "=== Running DISM Component Store Cleanup ==="
-        Write-Host "This may take 10-15 minutes..." -ForegroundColor Cyan
-        try {
-          # First cleanup
-          & DISM.exe /online /Cleanup-Image /StartComponentCleanup /ResetBase 2>&1 | Write-Host
-          Write-Host "DISM cleanup completed" -ForegroundColor Green
-        } catch {
-          Write-Host "Warning: DISM cleanup failed: $_" -ForegroundColor Yellow
         }
         Get-PSDrive C | Select-Object Used, Free
     - name: Clear Event Logs
