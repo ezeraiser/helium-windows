@@ -661,7 +661,9 @@ def main():
 
         winsparkle_ed_key = os.environ.get('WINSPARKLE_ED_KEY', '')
         authenticode_org = os.environ.get('WINSPARKLE_AUTHENTICODE_ORG', '')
-        if winsparkle_ed_key and authenticode_org:
+        # The Helium updater (WinSparkle + helper) is never wanted in a portable build,
+        # even if the repo variables happen to be set.
+        if winsparkle_ed_key and authenticode_org and not args.portable_only:
             gn_flags += 'enable_winsparkle=true\n'
             gn_flags += f'winsparkle_ed_key="{winsparkle_ed_key}"\n'
             gn_flags += f'winsparkle_authenticode_org="{authenticode_org}"\n'
@@ -687,9 +689,10 @@ def main():
 
     # Finish all release targets before signing. Siso can replace signed outputs
     # if it is invoked again to build their dependents (the mini installer).
-    ninja_commandline.extend(['chrome', 'chromedriver'])
+    ninja_commandline.append('chrome')
     if not args.portable_only:
-        ninja_commandline.extend(['setup', 'mini_installer'])
+        # chromedriver is not part of the portable ZIP (FILES.cfg lists it for 32bit only).
+        ninja_commandline.extend(['chromedriver', 'setup', 'mini_installer'])
 
     # Run ninja
     if args.ci:
