@@ -218,11 +218,24 @@ def _unpack_downloads_resilient(download_info, cache_dir, components, output_dir
         # staging directory trips the "already exists" precheck even though
         # nothing outside this loop is stale. Clear it before every attempt,
         # not just the first.
-        _clear_stale_extraction_staging(download_info, components, output_dir)
         try:
+            _clear_stale_extraction_staging(download_info, components, output_dir)
             downloads.unpack_downloads(download_info, cache_dir, components, output_dir,
                                        extractors)
             return
+        except PermissionError as exc:
+            # Windows refuses to rename/delete a directory while another process holds a
+            # handle inside it. Right after extraction that is almost always a real-time
+            # antivirus/EDR scan (e.g. Trellix) or the search indexer still reading the
+            # freshly written files; it clears up on its own after a few seconds.
+            if attempt == max_attempts:
+                raise
+            delay = 5 * attempt
+            get_logger().warning(
+                'Access denied during extraction (%s); a scanner probably has the files open. '
+                'Waiting %ds and retrying (attempt %d/%d).', exc.filename or exc, delay,
+                attempt, max_attempts)
+            time.sleep(delay)
         except FileExistsError as exc:
             if attempt == max_attempts:
                 raise
@@ -696,7 +709,9 @@ def main():
 
     # Run ninja
     if args.ci:
-        max_time = 5.5 * 60 * 60
+        # Leaves ~45 minutes of the 6 hour job limit for zipping and uploading the build
+        # tree (the zip alone took ~14 minutes on a full tree).
+        max_time = 5.25 * 60 * 60
         secs_spent = int(time.time()) - args.ci
         timeout = int(max_time - secs_spent)
         print(f"{timeout} seconds left for build")

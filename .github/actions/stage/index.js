@@ -196,12 +196,14 @@ async function run() {
         
         console.log('Creating artifacts.zip...');
         // Archive size isn't known up front; try D: when it has a reasonable amount of room,
-        // and redo it on C: if 7z fails there (e.g. the disk filled up).
+        // and redo it on C: if 7z fails there (e.g. the disk filled up). Exit code 1 only
+        // means some files couldn't be read (the archive is still complete), so it must not
+        // trigger the retry: redoing a 28 GiB zip costs ~15 minutes.
         let zipDir = await pickScratchDir(8 * 1024 ** 3, 'zip');
         let zipPath = path.join(zipDir, 'artifacts.zip');
         const zipArgs = out => ['a', '-tzip', out, 'C:\\helium-windows\\build\\src', '-mx=3', '-mtc=on'];
         let zipCode = await exec.exec('7z', zipArgs(zipPath), {ignoreReturnCode: true});
-        if (zipCode > 0 && zipDir !== FALLBACK_SCRATCH) {
+        if (zipCode > 1 && zipDir !== FALLBACK_SCRATCH) {
             console.log(`7z failed on ${zipDir} (exit ${zipCode}), retrying on C:...`);
             await io.rmRF(zipDir);
             zipDir = FALLBACK_SCRATCH;
