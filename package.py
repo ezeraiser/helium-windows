@@ -164,10 +164,13 @@ def stage_build(build_outputs, seven_zip, arch=None, portable_only=False):
     if portable_only:
         # filescfg's glob silently skips anything missing, so an incomplete build would
         # otherwise yield a broken ZIP without any error. These are all produced by the
-        # `chrome` ninja target itself (chrome_initial deps/data_deps). helium_update_helper.exe
-        # is deliberately not required: updates are applied manually for portable builds.
+        # `chrome` ninja target itself (chrome_initial deps/data_deps). Deliberately not
+        # required: helium_update_helper.exe (updates are applied manually for portable
+        # builds) and eventlog_provider.dll (only the mini_installer target builds it, and
+        # it is only used once an installer registers its event source, which a portable
+        # ZIP never does).
         required_files += [portable / name for name in (
-            'chrome_elf.dll', 'eventlog_provider.dll', 'notification_helper.exe',
+            'chrome_elf.dll', 'notification_helper.exe',
             'elevation_service.exe', 'chrome_proxy.exe', 'chrome_pwa_launcher.exe',
             'resources.pak', 'icudtl.dat')]
     else:
