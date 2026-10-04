@@ -45,12 +45,7 @@ runs:
       shell: pwsh
       run: throw 'Build did not finish within the available stages'
 
-    - name: Set up signing runtime
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'
-
-    - name: Sign and package release
+    - name: Package release (unsigned)
       id: release
       shell: pwsh
       working-directory: C:\helium-windows
@@ -63,9 +58,10 @@ runs:
         AZURE_SIGNING_ACCOUNT: ${{ inputs.azure-signing-account }}
         AZURE_SIGNING_CERTIFICATE_NAME: ${{ inputs.azure-signing-certificate-name }}
       run: |
-        nuget install Microsoft.ArtifactSigning.Client -Version 1.0.128 -ExcludeVersion -NonInteractive
-        if ($LASTEXITCODE) { exit $LASTEXITCODE }
-        python signing.py --portable-only --arch $env:TARGET_ARCH --dlib Microsoft.ArtifactSigning.Client/bin/x64/Azure.CodeSigning.Dlib.dll
+        # Ezer: this fork has no Azure Artifact Signing credentials, so skip
+        # signing (and the NuGet install of its client, which also breaks on
+        # runners with a stale Chocolatey nuget shim) and package unsigned.
+        python signing.py --portable-only --no-sign --arch $env:TARGET_ARCH
 
     - name: Upload artifacts
       id: stage3
