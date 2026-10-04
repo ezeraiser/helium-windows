@@ -11,6 +11,10 @@ on:
       from-artifact:
         required: true
         type: boolean
+      ntfs-compression:
+        required: false
+        type: boolean
+        default: true
     secrets:
       # Optional: without them, signing.py produces unsigned packages instead
       # of failing. Forks generally don't have these configured.
@@ -54,6 +58,7 @@ jobs:
           arm: ${{ inputs.arch == 'arm64' }}
           from_artifact: ${{ inputs.from-artifact }}
           package_here: true
+          ntfs_compression: ${{ inputs.ntfs-compression }}
       - uses: ./.github/actions/package
         id: package
         if: steps.stage.outputs.package_here == 'true'

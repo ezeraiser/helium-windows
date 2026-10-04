@@ -59,6 +59,7 @@ async function run() {
     })
     const from_artifact = core.getBooleanInput('from_artifact', {required: true});
     const upload_final = core.getBooleanInput('upload_final', {required: false});
+    const ntfs_compression = core.getBooleanInput('ntfs_compression', {required: false});
 
     const arm = core.getBooleanInput('arm', {required: false})
     console.log(`artifact: ${from_artifact}, upload_final: ${upload_final}`);
@@ -97,19 +98,27 @@ async function run() {
         
         await logDiskSpace('After deleting artifacts.zip');
         
-        // The extracted tree lands uncompressed; shrink it in place before the build resumes.
-        console.log('Applying NTFS compression to build directory...');
-        await exec.exec('compact', ['/c', '/s:C:\\helium-windows\\build', '/i'], {ignoreReturnCode: true});
-        
-        await logDiskSpace('After NTFS compression of build directory');
+        if (ntfs_compression) {
+            // The extracted tree lands uncompressed; shrink it in place before the build resumes.
+            console.log('Applying NTFS compression to build directory...');
+            await exec.exec('compact', ['/c', '/s:C:\\helium-windows\\build', '/i'], {ignoreReturnCode: true});
+
+            await logDiskSpace('After NTFS compression of build directory');
+        } else {
+            console.log('NTFS compression disabled; leaving build directory uncompressed.');
+        }
         
     } else if (!upload_final) {
-        // Mark the (still empty) build dir compressed so everything build.py writes into it
-        // inherits NTFS compression automatically, with no retroactive scan needed.
         await io.mkdirP('C:\\helium-windows\\build');
-        await exec.exec('compact', ['/c', 'C:\\helium-windows\\build'], {ignoreReturnCode: true});
-        
-        await logDiskSpace('After marking build directory for compression');
+        if (ntfs_compression) {
+            // Mark the (still empty) build dir compressed so everything build.py writes into it
+            // inherits NTFS compression automatically, with no retroactive scan needed.
+            await exec.exec('compact', ['/c', 'C:\\helium-windows\\build'], {ignoreReturnCode: true});
+
+            await logDiskSpace('After marking build directory for compression');
+        } else {
+            console.log('NTFS compression disabled; build directory stays uncompressed.');
+        }
     }
 
     const args = ['build.py', '--ci', String(started_at)]

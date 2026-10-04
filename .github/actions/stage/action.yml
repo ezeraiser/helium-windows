@@ -21,6 +21,10 @@ inputs:
   final_directory:
     description: Directory of verified release artifacts to upload
     required: false
+  ntfs_compression:
+    description: Compress the build directory with NTFS compression (saves disk space, costs build time)
+    required: false
+    default: true
 outputs:
   finished:
     description: If a previous stage already finished the build, the stage will set all output variables to the input ones and exit

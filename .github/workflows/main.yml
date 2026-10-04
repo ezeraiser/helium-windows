@@ -18,6 +18,11 @@ on:
         type: boolean
         description: 'Create a release after build is done'
         default: false
+      ntfs-compression:
+        required: false
+        type: boolean
+        description: 'Use NTFS compression on the build directory (saves disk space, costs build time)'
+        default: true
 
 permissions:
   contents: read
@@ -36,6 +41,7 @@ jobs:
     with:
       arch: ${{ inputs.arch }}
       runs-on: ${{ inputs.runner }}
+      ntfs-compression: ${{ inputs.ntfs-compression }}
 
   publish-release:
     needs: build
