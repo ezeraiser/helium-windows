@@ -149,6 +149,13 @@ our own commits go to `ezeraiser/helium` and `ezeraiser/helium-windows`.
   `::GetCommandLine()`); **this cannot work** and was removed — see "Why
   chrome://flags can't control Crashpad" below before reintroducing anything
   like it.
+- **`lpac-acls-oem-codepage.patch`** -- `testing/scripts/common.py`'s
+  `set_lpac_acls()` (run by the `//build/config/win:set_appcontainer_acls`
+  action so Chrome can start AppContainer-sandboxed processes from `out/`)
+  decodes `icacls` output with the ANSI code page although `icacls` writes the
+  OEM one; on Turkish Windows (cp1254 vs cp857) that is a `UnicodeDecodeError`
+  and fails the build early. One added `errors='replace'`; the action itself
+  must not be skipped.
 - `helium/hop/disable-password-manager.patch` was **removed** from the Helium
   patch set (it force-disabled Password Manager via an opinionated policy
   provider).
