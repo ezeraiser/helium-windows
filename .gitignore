@@ -2,3 +2,6 @@
 /.gcs_entries
 __pycache__
 /resources/generated
+/.vs
+/.vscode
+gitlog/
