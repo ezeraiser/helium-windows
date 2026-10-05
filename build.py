@@ -1003,14 +1003,37 @@ def main():
     # Enter source tree to run build commands
     os.chdir(source_tree)
 
+    # The .gn file says `script_executable = "python3"`, which GN resolves through
+    # PATH. With the Microsoft Store / Python Install Manager aliases installed that
+    # is WindowsApps\python3.exe, a stub that works in a shell but fails inside
+    # Siso's restricted environment ("No runtimes are installed"), taking every
+    # Python action of the build down with it. Local runs therefore hand GN the
+    # interpreter that runs this script (CI's PATH has a real one). GN keeps the
+    # switch in build.ninja's regeneration rule.
+    gn_script_args = []
+    script_executable_marker = Path('out/Default/.helium_script_executable')
+    script_executable_changed = False
+    if not args.ci:
+        script_executable = Path(sys.executable).as_posix()
+        gn_script_args.append(f'--script-executable={script_executable}')
+        try:
+            recorded = script_executable_marker.read_text(encoding=ENCODING).strip()
+        except OSError:
+            recorded = None
+        script_executable_changed = recorded != script_executable
+
     # build.ninja regenerates itself when a BUILD.gn or args.gn changes, so a local
-    # run only needs an explicit `gn gen` after this run changed the tree or the
-    # GN args; CI only when there is no build.ninja yet.
+    # run only needs an explicit `gn gen` after this run changed the tree, the GN
+    # args or the Python interpreter; CI only when there is no build.ninja yet.
     if (not os.path.exists('out\\Default\\build.ninja')
-            or (not args.ci and (tree_changed or args_gn_changed))):
+            or (not args.ci and (tree_changed or args_gn_changed or script_executable_changed))):
         # Run gn gen
         _run_build_process(
-            'buildtools\\win\\gn.exe', 'gen', 'out\\Default', '--fail-on-unused-args')
+            'buildtools\\win\\gn.exe', 'gen', 'out\\Default', '--fail-on-unused-args',
+            *gn_script_args)
+        if gn_script_args:
+            script_executable_marker.parent.mkdir(parents=True, exist_ok=True)
+            script_executable_marker.write_text(script_executable, encoding=ENCODING)
 
     # Ninja commandline
     os.environ['SISO_PATH'] = str(source_tree / 'third_party/siso/cipd/siso.exe')
