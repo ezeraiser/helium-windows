@@ -90,7 +90,7 @@ runs:
         }
         Get-PSDrive C | Select-Object Used, Free
     - name: Set up Python 3.12
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.12'
     - name: Install Windows SDK 10.0.28000.0
@@ -127,7 +127,7 @@ runs:
         Write-Host "=== After workspace cleanup ==="
         Get-PSDrive C | Select-Object Used, Free
     - name: Set up Node.js 24
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v5
       with:
         node-version: '24'
     - name: Setup Stage
