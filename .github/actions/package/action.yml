@@ -64,6 +64,8 @@ runs:
         python signing.py --portable-only --no-sign --arch $env:TARGET_ARCH
 
     - name: Upload symbols
+      # Upstream debugging aid; it must not stop the release package from being uploaded.
+      continue-on-error: true
       uses: actions/upload-artifact@v4
       with:
         name: helium-windows-${{ inputs.arch }}-symbols

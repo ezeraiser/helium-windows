@@ -9,16 +9,19 @@ runs:
     - name: Select build disk
       shell: pwsh
       run: |
-        # The build tree and the archives it is saved in are ~150 GB. Put the tree on whichever
-        # of C: and D: has more free space (D: is the runner's temp disk and may be missing or
-        # small). Only a tree on C: needs the cleanup steps below, which are what makes room
-        # there; with D: chosen they are skipped.
+        # The build tree and the archives it is saved in are large. Build on D: (the runner's
+        # temp disk) when it has at least $minDFree free, and on C: otherwise (D: may be
+        # missing or small). The rule is a fixed threshold rather than "whichever is larger",
+        # so every job of a run picks the same drive and the tree restored from a previous
+        # job's artifact lands under the same root. Only a tree on C: needs the cleanup steps
+        # below, which are what makes room there; with D: chosen they are skipped.
+        $minDFree = 140GB
         $cFree = (Get-PSDrive C).Free
         $dFree = 0
         if (Test-Path 'D:\') { $dFree = (Get-PSDrive D -ErrorAction SilentlyContinue).Free }
         $gb = { param($b) [math]::Round($b / 1GB, 2) }
         Write-Host "Free space: C: $(& $gb $cFree) GB, D: $(& $gb $dFree) GB"
-        if ($dFree -gt $cFree) { $drive = 'D' } else { $drive = 'C' }
+        if ($dFree -ge $minDFree) { $drive = 'D' } else { $drive = 'C' }
         Write-Host "Building on $drive`:"
         "HELIUM_DRIVE=$drive" >> $env:GITHUB_ENV
         "HELIUM_ROOT=$drive`:\helium-windows" >> $env:GITHUB_ENV
