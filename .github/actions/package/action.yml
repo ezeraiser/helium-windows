@@ -63,6 +63,18 @@ runs:
         # runners with a stale Chocolatey nuget shim) and package unsigned.
         python signing.py --portable-only --no-sign --arch $env:TARGET_ARCH
 
+    - name: Upload symbols
+      uses: actions/upload-artifact@v4
+      with:
+        name: helium-windows-${{ inputs.arch }}-symbols
+        path: |
+          C:\helium-windows\build\src\out\Default\*.pdb
+          C:\helium-windows\build\src\out\Default\*.exe
+          C:\helium-windows\build\src\out\Default\*.dll
+        if-no-files-found: error
+        retention-days: 4
+        overwrite: true
+
     - name: Upload artifacts
       id: stage3
       uses: ./.github/actions/stage
