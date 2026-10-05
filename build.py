@@ -14,6 +14,9 @@ Helium build script for Windows
 
 import sys
 import time
+import json
+import atexit
+import hashlib
 import argparse
 import os
 import shutil
@@ -170,6 +173,124 @@ def _compute_prepare_fingerprint(root_dir, args):
         add_file(root_dir / rel_path)
 
     return hasher.hexdigest()
+
+
+class _PrepareProgress:
+    """Local-only record of how far the prepare block got (build/download_cache/
+    prepare_progress.json), with a numbered log line per step.
+
+    It does NOT make prepare resumable: unpacking an archive into an already
+    populated tree fails on the final rename, pruning an already pruned tree
+    reports every file as missing, and a half-applied patch leaves the tree
+    inconsistent, so a prepare that stopped midway has to start from the clone
+    again. What this gives you is knowing where it stopped, immediately when it
+    happens and again at the start of the next run.
+    """
+
+    TOTAL = 10
+
+    def __init__(self, path, enabled):
+        self.path = path
+        self.enabled = enabled
+        self.index = 0
+        self.name = None
+        self.finished = False
+        self.step_started = self.started = time.time()
+        if not enabled:
+            return
+        try:
+            previous = json.loads(path.read_text(encoding=ENCODING))
+        except (OSError, ValueError):
+            previous = {}
+        if previous.get('state') == 'running':
+            get_logger().warning(
+                'The previous prepare stopped during step %s/%s "%s". Steps cannot safely '
+                'resume midway, so the source tree is prepared from scratch again.',
+                previous.get('index'), self.TOTAL, previous.get('step'))
+        atexit.register(self._report_stop)
+
+    def _write(self, state):
+        try:
+            self.path.write_text(json.dumps({
+                'state': state, 'index': self.index, 'step': self.name,
+                'updated': time.strftime('%Y-%m-%d %H:%M:%S'),
+            }), encoding=ENCODING)
+        except OSError:
+            pass
+
+    def step(self, name):
+        if not self.enabled:
+            return
+        now = time.time()
+        if self.name:
+            get_logger().info('    done in %.0fs', now - self.step_started)
+        self.index += 1
+        self.name = name
+        self.step_started = now
+        get_logger().info('[%d/%d] %s', self.index, self.TOTAL, name)
+        self._write('running')
+
+    def done(self):
+        if not self.enabled:
+            return
+        self.finished = True
+        get_logger().info('Prepare finished in %.0fs.', time.time() - self.started)
+        self._write('done')
+
+    def _report_stop(self):
+        if self.enabled and self.name and not self.finished:
+            get_logger().error('Prepare stopped during step %d/%d "%s" after %.0fs.',
+                               self.index, self.TOTAL, self.name,
+                               time.time() - self.step_started)
+
+
+def _check_downloads_cached(download_info, cache_dir, components, enabled):
+    """downloads.check_downloads(), but a local run skips the files it already
+    verified: same size, same modification time and the same expected hashes as
+    when they last passed (build/download_cache/verified_downloads.json). Hashing
+    the Chromium archive alone takes about half a minute on every run."""
+    if not enabled:
+        return downloads.check_downloads(download_info, cache_dir, components)
+
+    record_path = cache_dir / 'verified_downloads.json'
+    try:
+        record = json.loads(record_path.read_text(encoding=ENCODING))
+    except (OSError, ValueError):
+        record = {}
+
+    def fingerprint(name, props):
+        stat = (cache_dir / props.download_filename).stat()
+        hashes = sorted(str(pair) for pair in downloads._get_hash_pairs(props, cache_dir))
+        digest = hashlib.sha256(repr(hashes).encode(ENCODING)).hexdigest()
+        return [stat.st_size, stat.st_mtime_ns, digest]
+
+    pending, stamps = [], {}
+    for name, props in download_info.properties_iter():
+        if components and name not in components:
+            continue
+        try:
+            stamps[name] = fingerprint(name, props)
+        except OSError:
+            pending.append(name)  # missing file: let check_downloads report it
+            continue
+        if record.get(props.download_filename) != stamps[name]:
+            pending.append(name)
+
+    skipped = len(stamps) - len([n for n in pending if n in stamps])
+    if skipped:
+        get_logger().info('Skipping hash verification of %d already verified download(s)', skipped)
+    if pending:
+        downloads.check_downloads(download_info, cache_dir, pending)
+        for name in pending:
+            props = download_info[name]
+            try:
+                record[props.download_filename] = fingerprint(name, props)
+            except OSError:
+                pass
+        try:
+            record_path.write_text(json.dumps(record), encoding=ENCODING)
+        except OSError:
+            pass
 
 
 def _clear_stale_extraction_staging(download_info, components, output_dir):
@@ -432,6 +553,8 @@ def main():
         need_prepare = not (source_tree / 'BUILD.gn').exists()
 
     if need_prepare:
+        progress = _PrepareProgress(downloads_cache / 'prepare_progress.json', not args.ci)
+
         # Setup environment
         source_tree.mkdir(parents=True, exist_ok=True)
         downloads_cache.mkdir(parents=True, exist_ok=True)
@@ -444,13 +567,14 @@ def main():
         }
 
         # Prepare source folder
+        progress.step('Fetch the Chromium source (clone or tarball)')
         if args.tarball:
             # Download chromium tarball
             get_logger().info('Downloading chromium tarball...')
             download_info = downloads.DownloadInfo([_ROOT_DIR / 'helium-chromium' / 'downloads.ini'])
             downloads.retrieve_downloads(download_info, downloads_cache, None, True)
             try:
-                downloads.check_downloads(download_info, downloads_cache, None)
+                _check_downloads_cached(download_info, downloads_cache, None, not args.ci)
             except downloads.HashMismatchError as exc:
                 get_logger().error('File checksum does not match: %s', exc)
                 exit(1)
@@ -468,6 +592,7 @@ def main():
             _restore_toolchain_caches(source_tree, toolchain_cache)
 
         # Retrieve windows downloads
+        progress.step('Download and verify the required files and deps')
         get_logger().info('Downloading required files...')
         download_info_win = downloads.DownloadInfo([_ROOT_DIR / 'downloads.ini'])
         components = list(download_info_win)
@@ -475,7 +600,7 @@ def main():
             components.remove('nodejs-linux')
         downloads.retrieve_downloads(download_info_win, downloads_cache, components, True)
         try:
-            downloads.check_downloads(download_info_win, downloads_cache, components)
+            _check_downloads_cached(download_info_win, downloads_cache, components, not args.ci)
         except downloads.HashMismatchError as exc:
             get_logger().error('File checksum does not match: %s', exc)
             exit(1)
@@ -485,15 +610,17 @@ def main():
         deps_info = downloads.DownloadInfo([_ROOT_DIR / 'helium-chromium' / 'deps.ini'])
         downloads.retrieve_downloads(deps_info, downloads_cache, None, True)
         try:
-            downloads.check_downloads(deps_info, downloads_cache, None)
+            _check_downloads_cached(deps_info, downloads_cache, None, not args.ci)
         except downloads.HashMismatchError as exc:
             get_logger().error('File checksum does not match: %s', exc)
             exit(1)
+        progress.step('Unpack deps')
         get_logger().info('Unpacking deps...')
         _unpack_downloads_resilient(deps_info, downloads_cache, None, source_tree, extractors)
 
 
         # Prune binaries
+        progress.step('Prune binaries')
         pruning_list = _ROOT_DIR / 'helium-chromium' / 'pruning.list'
         unremovable_files = prune_binaries.prune_files(
             source_tree,
@@ -517,9 +644,11 @@ def main():
         if ESBUILD.exists():
             rmtree(ESBUILD)
             ESBUILD.mkdir()
+        progress.step('Unpack downloads')
         get_logger().info('Unpacking downloads...')
         _unpack_downloads_resilient(download_info_win, downloads_cache, components, source_tree, extractors)
 
+        progress.step('Install CIPD dependencies')
         cipd_cache = downloads_cache / 'cipd'
         cipd_cache.mkdir(exist_ok=True)
         cipd_env = os.environ.copy()
@@ -540,6 +669,7 @@ def main():
                             siso_backend_dir / 'backend.star')
 
         # Apply patches
+        progress.step('Apply patches')
         # First, ungoogled-chromium-patches
         patches.apply_patches(
             patches.generate_patches_from_series(_ROOT_DIR / 'helium-chromium' / 'patches', resolve=True),
@@ -553,6 +683,7 @@ def main():
             patch_bin_path=(source_tree / _PATCH_BIN_RELPATH)
         )
 
+        progress.step('Update the Rust and Clang toolchains')
         # Download toolchains after the Windows extraction patch, before domain
         # substitution rewrites the download URL shared by Rust and Clang.
         with chdir(source_tree):
@@ -564,6 +695,7 @@ def main():
                     '--host-os=linux',
                     '--output-dir=third_party/llvm-build/Release+Asserts_linux')
 
+        progress.step('Substitute domains and names, add translations')
         if not args.dev:
             # Substitute domains
             domain_substitution_list = _ROOT_DIR / 'helium-chromium' / 'domain_substitution.list'
@@ -585,6 +717,7 @@ def main():
             # Append translations
             i18n_apply.apply_translations(source_tree)
 
+        progress.step('Set the version and copy resources')
         # Set version
         version_parts = helium_version.get_version_parts(_ROOT_DIR / 'helium-chromium', _ROOT_DIR)
         chrome_version_path = source_tree / "chrome" / "VERSION"
@@ -624,6 +757,7 @@ def main():
             downloads_cache.mkdir(parents=True, exist_ok=True)
             prepare_fingerprint_path.write_text(
                 f'{current_fingerprint}\ndev={args.dev}\n', encoding=ENCODING)
+        progress.done()
     elif not args.ci:
         get_logger().info(
             'Source tree already prepared and unchanged since (patches, '
