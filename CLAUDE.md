@@ -193,10 +193,10 @@ complains about slow repeated local builds:
   (outside `build/src`, so it survives `git clean`) alongside which mode
   (`dev=True`/`dev=False`) produced it. On a local run, that whole block is
   skipped when `BUILD.gn` already exists and the fingerprint still matches.
-  **Editing any `patches/ezer/*.patch` file always invalidates this** and
-  triggers a full re-clone+re-apply (by design — there's no safe way to
-  reapply just the changed patch in a sequential/cumulative patch chain), so
-  this alone doesn't make patch-edit-and-rebuild loops fast.
+  **Editing any `patches/*.patch` file invalidates this.** For a normal
+  (non-`--dev`) tree that means a full re-clone+re-apply. For a `--dev` tree
+  the patches are updated in place instead (see "In-place patch update"
+  below), so patch-edit-and-rebuild loops are fast there.
 - **`--dev`** is the actual fast-iteration flag: it sets
   `is_component_build=true` (small per-DLL relinks instead of relinking one
   monolithic `chrome.dll`) and `optimize_webui=false` (Settings/WebUI
@@ -215,6 +215,44 @@ complains about slow repeated local builds:
   the `if not args.dev:` guard around those steps), so `need_prepare` forces
   a real re-prepare if a later **non**-`--dev` run would otherwise have
   reused that incomplete tree.
+
+Other local-only (`not args.ci`) behaviour of `build.py` worth knowing:
+
+- **Portable is the default, everywhere.** `build.py` (also `--dev`, also CI)
+  builds only the `chrome` target; `signing.py` packages only the portable
+  ZIP. `--installer` opts in to `chromedriver`/`setup`/`mini_installer` and
+  the NSIS/mini-installer packages. `--portable-only` is still accepted but
+  does nothing (the CI workflows still pass it explicitly).
+- **In-place patch update** (`_try_incremental_patch_update`). The prepare
+  stores a copy of every applied patch in
+  `build/download_cache/applied_patches/` (+ `applied_patches.json`), and
+  `prepare_fingerprint.txt` gets a third line `inputs=<hash>` of everything
+  that feeds the prepare except the patches. If a `--dev` run finds that only
+  patches changed (same inputs, tree prepared with `dev=True`, so no
+  domain/name substitution got in the way), it reverse-applies the saved
+  copies from the first changed patch onwards and applies the new ones, so
+  only the files those patches touch get a new mtime (a fresh clone touches
+  nearly all of them, which forces Siso to rebuild almost everything). If
+  anything does not undo/apply cleanly, or more than 60 patches changed (an
+  imputnet sync), it falls back to a normal prepare; the fingerprint file is
+  invalidated before the tree is touched, so an interrupted update is never
+  mistaken for a prepared tree. A tree prepared before this existed is
+  backfilled automatically when its fingerprint still matches. A hand edit
+  of a file under `build/src` that a changed patch touches makes the update
+  fall back to a full prepare.
+- **`_PrepareProgress`** logs `[n/10] step` lines and records the current one
+  in `prepare_progress.json`; if a prepare stops midway it says so at once and
+  at the start of the next run. It does *not* resume: unpacking into a
+  populated tree, pruning an already pruned tree and half-applied patches are
+  not safe to repeat, which is why a stopped prepare starts from the clone.
+- **`_check_downloads_cached`** skips re-hashing cached downloads whose size,
+  mtime and expected hashes match `verified_downloads.json`.
+- **`args.gn` is rewritten only when its content changes, and `gn gen` runs
+  only after the tree or the GN args changed** (or `build.ninja` is missing);
+  `build.ninja` regenerates itself for plain BUILD.gn edits.
+- **Pruning ignores missing `third_party/chromium-bidi/node_modules/` files.**
+  CI validates the source file lists against the official lite tarball, which
+  ships that directory; the tree `clone.py` produces does not have it.
 
 **The actual fast local workflow to suggest:**
 1. First do one full normal build (`python build.py`), so `build/src` is

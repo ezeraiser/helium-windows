@@ -175,6 +175,149 @@ def _compute_prepare_fingerprint(root_dir, args):
     return hasher.hexdigest()
 
 
+def _compute_inputs_fingerprint(root_dir, args):
+    """Like _compute_prepare_fingerprint(), minus the patches: everything else
+    that feeds the prepare. _try_incremental_patch_update() may only edit the
+    patched tree in place when this is unchanged (same Chromium version, same
+    pruning/substitution lists, ...) and only the patches differ."""
+    hasher = hashlib.sha256()
+
+    def add(data):
+        hasher.update(len(data).to_bytes(8, 'little'))
+        hasher.update(data)
+
+    add(f'arm={args.arm};tarball={args.tarball}'.encode(ENCODING))
+    for rel_path in _PREPARE_FINGERPRINT_INPUTS:
+        path = root_dir / rel_path
+        add(path.read_bytes() if path.exists() else b'<missing>')
+    return hasher.hexdigest()
+
+
+def _patch_entries(root_dir):
+    """Every patch of both series in the order build.py applies them."""
+    entries = []
+    for label, series_dir in (('chromium', root_dir / 'helium-chromium' / 'patches'),
+                              ('windows', root_dir / 'patches')):
+        for rel in patches.parse_series(series_dir / 'series'):
+            path = (series_dir / rel).resolve()
+            entries.append({
+                'label': label,
+                'rel': str(rel).replace('\\', '/'),
+                'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                'path': path,
+            })
+    return entries
+
+
+_APPLIED_PATCHES_DIR = 'applied_patches'
+_APPLIED_PATCHES_RECORD = 'applied_patches.json'
+# Beyond this many patches (an upstream sync, say) a clean prepare is the safer bet.
+_MAX_INCREMENTAL_PATCHES = 60
+
+
+def _save_applied_patches(cache_dir, entries):
+    """Keep a copy of the patches the tree was prepared with: undoing them later
+    needs the exact text that was applied, not whatever the files say by then."""
+    target = cache_dir / _APPLIED_PATCHES_DIR
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True)
+    record = []
+    for index, entry in enumerate(entries):
+        saved = f'{index:04d}.patch'
+        shutil.copyfile(entry['path'], target / saved)
+        record.append({k: entry[k] for k in ('label', 'rel', 'sha256')} | {'file': saved})
+    # Written last: a record without its files (interrupted copy) is rejected on load.
+    (cache_dir / _APPLIED_PATCHES_RECORD).write_text(json.dumps(record), encoding=ENCODING)
+
+
+def _load_applied_patches(cache_dir):
+    """The saved record, or None if it is missing or does not match its files."""
+    try:
+        record = json.loads((cache_dir / _APPLIED_PATCHES_RECORD).read_text(encoding=ENCODING))
+        for entry in record:
+            data = (cache_dir / _APPLIED_PATCHES_DIR / entry['file']).read_bytes()
+            if hashlib.sha256(data).hexdigest() != entry['sha256']:
+                return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return record
+
+
+def _backfill_incremental_state(root_dir, cache_dir, fingerprint_path, marker_lines,
+                                inputs_fingerprint):
+    """A tree whose fingerprint still matches was prepared with exactly today's
+    patch files, so the record that makes in-place updates possible can be
+    created from them (trees prepared before this existed have none)."""
+    has_inputs = len(marker_lines) > 2 and marker_lines[2].startswith('inputs=')
+    if has_inputs and _load_applied_patches(cache_dir) is not None:
+        return
+    _save_applied_patches(cache_dir, _patch_entries(root_dir))
+    lines = list(marker_lines[:2]) + [f'inputs={inputs_fingerprint}']
+    fingerprint_path.write_text('\n'.join(lines) + '\n', encoding=ENCODING)
+
+
+def _try_incremental_patch_update(root_dir, args, source_tree, cache_dir, fingerprint_path,
+                                  marker_lines, current_fingerprint, inputs_fingerprint,
+                                  patch_bin):
+    """Bring a --dev tree up to date with changed patches without re-preparing it.
+
+    Re-preparing means a fresh clone, so the mtime of nearly every file changes
+    and Siso rebuilds almost everything; undoing only the patches from the first
+    changed one onwards and applying the new ones touches just the files those
+    patches are about. Returns True when the tree is current afterwards. False
+    means nothing here was usable (or a patch did not undo/apply cleanly, which
+    can leave the tree half-patched) and the caller must prepare from scratch;
+    that is also what happens if this is interrupted, because the fingerprint
+    file is invalidated before the tree is touched.
+
+    Only valid for a --dev tree: a normal prepare substitutes domains and names
+    in the files the patches touched, so its patches could not be reversed.
+    """
+    logger = get_logger()
+    if not (args.dev and len(marker_lines) > 2 and marker_lines[1] == 'dev=True'
+            and marker_lines[2] == f'inputs={inputs_fingerprint}'):
+        return False
+    if not (source_tree / 'BUILD.gn').exists():
+        return False
+    old = _load_applied_patches(cache_dir)
+    if old is None:
+        return False
+
+    new = _patch_entries(root_dir)
+
+    def key(entry):
+        return (entry['label'], entry['rel'], entry['sha256'])
+
+    common = 0
+    while common < min(len(old), len(new)) and key(old[common]) == key(new[common]):
+        common += 1
+    old_tail, new_tail = old[common:], new[common:]
+    if max(len(old_tail), len(new_tail)) > _MAX_INCREMENTAL_PATCHES:
+        logger.info('Too many patches changed (%d/%d) for an in-place update.',
+                    len(old_tail), len(new_tail))
+        return False
+
+    logger.info('Patches changed: undoing %d and applying %d in place (the first %d are '
+                'unchanged).', len(old_tail), len(new_tail), common)
+    fingerprint_path.write_text('incremental-patch-update-in-progress\n', encoding=ENCODING)
+    try:
+        if old_tail:
+            patches.apply_patches(
+                [cache_dir / _APPLIED_PATCHES_DIR / entry['file'] for entry in old_tail],
+                source_tree, reverse=True, patch_bin_path=patch_bin)
+        if new_tail:
+            patches.apply_patches([entry['path'] for entry in new_tail], source_tree,
+                                  patch_bin_path=patch_bin)
+    except (subprocess.CalledProcessError, OSError, ValueError) as exc:
+        logger.warning('Updating the patches in place failed (%s); preparing from scratch.', exc)
+        return False
+
+    _save_applied_patches(cache_dir, new)
+    fingerprint_path.write_text(
+        f'{current_fingerprint}\ndev=True\ninputs={inputs_fingerprint}\n', encoding=ENCODING)
+    return True
+
+
 class _PrepareProgress:
     """Local-only record of how far the prepare block got (build/download_cache/
     prepare_progress.json), with a numbered log line per step.
@@ -508,13 +651,20 @@ def main():
         action='store_true'
     )
     parser.add_argument(
+        '--installer',
+        action='store_true',
+        help=('Also build chromedriver, setup and mini_installer. By default (and with '
+              '--dev, and in CI) only chrome is built, which is all the portable ZIP '
+              'needs. Only changes the ninja targets, so it is not part of the prepare '
+              'fingerprint.')
+    )
+    parser.add_argument(
         '--portable-only',
         action='store_true',
-        help=('Build only what the portable ZIP needs (skips the setup and mini_installer '
-              'targets). Only changes the ninja targets, so it is not part of the '
-              'prepare fingerprint.')
+        help=argparse.SUPPRESS  # the default now; still accepted so existing callers work
     )
     args = parser.parse_args()
+    args.portable_only = not args.installer
 
     # Set common variables
     source_tree = _ROOT_DIR / 'build' / 'src'
@@ -535,6 +685,7 @@ def main():
     if not args.ci:
         current_fingerprint = _compute_prepare_fingerprint(_ROOT_DIR, args)
         stored_fingerprint = None
+        marker_lines = []
         stored_tree_is_dev_raw = True  # unknown marker => assume the worst
         if prepare_fingerprint_path.exists():
             marker_lines = prepare_fingerprint_path.read_text(encoding=ENCODING).splitlines()
@@ -551,6 +702,22 @@ def main():
         )
     else:
         need_prepare = not (source_tree / 'BUILD.gn').exists()
+
+    # Set when this run changed the tree (full prepare or in-place patch update);
+    # decides whether `gn gen` has to run again below.
+    tree_changed = need_prepare
+    inputs_fingerprint = None
+    if not args.ci:
+        inputs_fingerprint = _compute_inputs_fingerprint(_ROOT_DIR, args)
+        if not need_prepare:
+            _backfill_incremental_state(_ROOT_DIR, downloads_cache, prepare_fingerprint_path,
+                                        marker_lines, inputs_fingerprint)
+        elif _try_incremental_patch_update(
+                _ROOT_DIR, args, source_tree, downloads_cache, prepare_fingerprint_path,
+                marker_lines, current_fingerprint, inputs_fingerprint,
+                source_tree / _PATCH_BIN_RELPATH):
+            need_prepare = False
+            tree_changed = True
 
     if need_prepare:
         progress = _PrepareProgress(downloads_cache / 'prepare_progress.json', not args.ci)
@@ -670,6 +837,7 @@ def main():
 
         # Apply patches
         progress.step('Apply patches')
+        applied_entries = None if args.ci else _patch_entries(_ROOT_DIR)
         # First, ungoogled-chromium-patches
         patches.apply_patches(
             patches.generate_patches_from_series(_ROOT_DIR / 'helium-chromium' / 'patches', resolve=True),
@@ -755,8 +923,10 @@ def main():
 
         if not args.ci:
             downloads_cache.mkdir(parents=True, exist_ok=True)
+            _save_applied_patches(downloads_cache, applied_entries)
             prepare_fingerprint_path.write_text(
-                f'{current_fingerprint}\ndev={args.dev}\n', encoding=ENCODING)
+                f'{current_fingerprint}\ndev={args.dev}\ninputs={inputs_fingerprint}\n',
+                encoding=ENCODING)
         progress.done()
     elif not args.ci:
         get_logger().info(
@@ -772,6 +942,7 @@ def main():
     formatter.unlink(missing_ok=True)
     formatter.symlink_to(clang_format)
 
+    args_gn_changed = False
     if not args.ci or not (source_tree / 'out/Default').exists():
         # Output args.gn
         (source_tree / 'out/Default').mkdir(parents=True, exist_ok=True)
@@ -820,12 +991,23 @@ def main():
             gn_flags += f'winsparkle_ed_key="{winsparkle_ed_key}"\n'
             gn_flags += f'winsparkle_authenticode_org="{authenticode_org}"\n'
 
-        (source_tree / 'out/Default/args.gn').write_text(gn_flags, encoding=ENCODING)
+        # Only touch args.gn when its content changes: a new mtime alone makes
+        # Siso reload build.ninja, and `gn gen` below only has to run if it differs.
+        args_gn = source_tree / 'out/Default/args.gn'
+        previous_args = (args_gn.read_text(encoding=ENCODING).replace('\r\n', '\n')
+                         if args_gn.exists() else None)
+        if previous_args != gn_flags.replace('\r\n', '\n'):
+            args_gn.write_text(gn_flags, encoding=ENCODING)
+            args_gn_changed = True
 
     # Enter source tree to run build commands
     os.chdir(source_tree)
 
-    if not args.ci or not os.path.exists('out\\Default\\build.ninja'):
+    # build.ninja regenerates itself when a BUILD.gn or args.gn changes, so a local
+    # run only needs an explicit `gn gen` after this run changed the tree or the
+    # GN args; CI only when there is no build.ninja yet.
+    if (not os.path.exists('out\\Default\\build.ninja')
+            or (not args.ci and (tree_changed or args_gn_changed))):
         # Run gn gen
         _run_build_process(
             'buildtools\\win\\gn.exe', 'gen', 'out\\Default', '--fail-on-unused-args')

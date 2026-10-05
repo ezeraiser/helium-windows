@@ -96,11 +96,14 @@ def parse_args():
     parser.add_argument('--arch', choices=('x64', 'arm64'))
     parser.add_argument('--seven-zip', type=Path,
                         default=Path(shutil.which('7z') or 'C:/Program Files/7-Zip/7z.exe'))
-    parser.add_argument('--portable-only', action='store_true',
-                        help='Package only the portable ZIP (no NSIS/mini installer).')
+    parser.add_argument('--installer', action='store_true',
+                        help='Also package the NSIS installer and the mini installer. By default '
+                             'only the portable ZIP is packaged.')
+    parser.add_argument('--portable-only', action='store_true', help=argparse.SUPPRESS)  # default
     parser.add_argument('--no-sign', action='store_true',
                         help='Skip Azure code signing and produce unsigned packages.')
     args = parser.parse_args()
+    args.portable_only = not args.installer
     args.build_outputs = args.build_outputs.resolve()
     args.seven_zip = args.seven_zip.resolve()
 
