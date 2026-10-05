@@ -499,6 +499,11 @@ def main():
             source_tree,
             pruning_list.read_text(encoding=ENCODING).splitlines()
         )
+        # The source file lists are validated in CI against the official lite tarball,
+        # which ships third_party/chromium-bidi/node_modules; the tree cloned above does
+        # not have it, so its entries in pruning.list are legitimately absent here.
+        unremovable_files = {f for f in unremovable_files
+                             if not f.startswith('third_party/chromium-bidi/node_modules/')}
         if unremovable_files:
             get_logger().error('Files could not be pruned: %s', unremovable_files)
             parser.exit(1)
