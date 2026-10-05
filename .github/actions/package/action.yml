@@ -48,7 +48,7 @@ runs:
     - name: Package release (unsigned)
       id: release
       shell: pwsh
-      working-directory: C:\helium-windows
+      working-directory: ${{ env.HELIUM_ROOT }}
       env:
         TARGET_ARCH: ${{ inputs.arch == 'arm64' && 'arm64' || 'x64' }}
         AZURE_TENANT_ID: ${{ inputs.azure-tenant-id }}

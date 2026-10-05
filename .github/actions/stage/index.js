@@ -8,8 +8,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const BUILD_DIR = 'C:\\helium-windows\\build';
-const SCRATCH_CANDIDATE = 'D:\\helium-scratch';
+// Root of the build checkout. prepare-environment picks the drive with the most free space
+// and exports it as HELIUM_ROOT; C: is the historical default.
+const ROOT_DIR = process.env.HELIUM_ROOT || 'C:\\helium-windows';
+const BUILD_DIR = path.join(ROOT_DIR, 'build');
+// The multi-GB archives are parked on the *other* drive, so they don't share a disk with the
+// build tree.
+const SCRATCH_DRIVE = ROOT_DIR.toUpperCase().startsWith('D:') ? 'C:' : 'D:';
+const SCRATCH_CANDIDATE = `${SCRATCH_DRIVE}\\helium-scratch`;
 const FALLBACK_SCRATCH = BUILD_DIR;
 // Headroom kept free on D: besides the archive itself.
 const SCRATCH_MARGIN_BYTES = 1024 ** 3;
@@ -19,21 +25,23 @@ async function freeBytes(dir) {
     return Number(st.bavail) * Number(st.bsize);
 }
 
-// The multi-GB artifacts.zip is parked on the runner's D: temp disk (when present and big
-// enough) so it doesn't share C: with the extracted build tree. Falls back to C: otherwise.
+// The multi-GB artifacts.zip is parked on the drive that does not hold the build tree (when
+// present and big enough), so the two don't compete for the same disk. Falls back to the
+// build directory otherwise.
 async function pickScratchDir(neededBytes, label) {
+    const drive = `${SCRATCH_DRIVE}\\`;
     try {
-        await fs.promises.access('D:\\');
-        const free = await freeBytes('D:\\');
+        await fs.promises.access(drive);
+        const free = await freeBytes(drive);
         const gb = b => (b / 1024 ** 3).toFixed(2);
-        console.log(`[${label}] D: free ${gb(free)} GB, need ${gb(neededBytes + SCRATCH_MARGIN_BYTES)} GB`);
+        console.log(`[${label}] ${SCRATCH_DRIVE} free ${gb(free)} GB, need ${gb(neededBytes + SCRATCH_MARGIN_BYTES)} GB`);
         if (free >= neededBytes + SCRATCH_MARGIN_BYTES) {
             await io.mkdirP(SCRATCH_CANDIDATE);
             return SCRATCH_CANDIDATE;
         }
-        console.log(`[${label}] D: too small, falling back to C:`);
+        console.log(`[${label}] ${SCRATCH_DRIVE} too small, falling back to ${BUILD_DIR}`);
     } catch (e) {
-        console.log(`[${label}] D: unavailable (${e.message}), falling back to C:`);
+        console.log(`[${label}] ${SCRATCH_DRIVE} unavailable (${e.message}), falling back to ${BUILD_DIR}`);
     }
     return FALLBACK_SCRATCH;
 }
@@ -101,7 +109,7 @@ async function run() {
         if (ntfs_compression) {
             // The extracted tree lands uncompressed; shrink it in place before the build resumes.
             console.log('Applying NTFS compression to build directory...');
-            await exec.exec('compact', ['/c', '/s:C:\\helium-windows\\build', '/i'], {ignoreReturnCode: true});
+            await exec.exec('compact', ['/c', `/s:${BUILD_DIR}`, '/i'], {ignoreReturnCode: true});
 
             await logDiskSpace('After NTFS compression of build directory');
         } else {
@@ -109,11 +117,11 @@ async function run() {
         }
         
     } else if (!upload_final) {
-        await io.mkdirP('C:\\helium-windows\\build');
+        await io.mkdirP(BUILD_DIR);
         if (ntfs_compression) {
             // Mark the (still empty) build dir compressed so everything build.py writes into it
             // inherits NTFS compression automatically, with no retroactive scan needed.
-            await exec.exec('compact', ['/c', 'C:\\helium-windows\\build'], {ignoreReturnCode: true});
+            await exec.exec('compact', ['/c', BUILD_DIR], {ignoreReturnCode: true});
 
             await logDiskSpace('After marking build directory for compression');
         } else {
@@ -163,14 +171,14 @@ async function run() {
             }
         }
 
-        // The GitHub workspace is emptied after the repo is copied to C:\helium-windows
+        // The GitHub workspace is emptied after the repo is copied to the build root
         // (see prepare-environment), so the checkout has to be read from the copy.
         const { exitCode, stdout } = await exec.getExecOutput('python', [
             'helium-chromium\\utils\\helium_version.py',
             '--print',
             '--tree', 'helium-chromium',
             '--platform-tree', '.'
-        ], { cwd: 'C:\\helium-windows' });
+        ], { cwd: ROOT_DIR });
 
         if (exitCode !== 0) throw `failed getting version: ${exitCode}`;
         core.setOutput('version', stdout.trim());
@@ -179,14 +187,14 @@ async function run() {
     }
 
     await exec.exec('python', ['-m', 'pip', 'install', 'httplib2==0.22.0', 'Pillow', 'clang-format'], {
-        cwd: 'C:\\helium-windows',
+        cwd: ROOT_DIR,
         ignoreReturnCode: true
     });
     
     await logDiskSpace('Before build.py');
     
     const retCode = await exec.exec('python', args, {
-        cwd: 'C:\\helium-windows',
+        cwd: ROOT_DIR,
         ignoreReturnCode: true
     });
 
@@ -206,16 +214,17 @@ async function run() {
         await logDiskSpace('Before creating artifacts.zip');
         
         console.log('Creating artifacts.zip...');
-        // Archive size isn't known up front; try D: when it has a reasonable amount of room,
-        // and redo it on C: if 7z fails there (e.g. the disk filled up). Exit code 1 only
+        // Archive size isn't known up front; try the other drive when it has a reasonable
+        // amount of room, and redo it in the build directory if 7z fails there (e.g. the disk
+        // filled up). Exit code 1 only
         // means some files couldn't be read (the archive is still complete), so it must not
         // trigger the retry: redoing a 28 GiB zip costs ~15 minutes.
         let zipDir = await pickScratchDir(8 * 1024 ** 3, 'zip');
         let zipPath = path.join(zipDir, 'artifacts.zip');
-        const zipArgs = out => ['a', '-tzip', out, 'C:\\helium-windows\\build\\src', '-mx=3', '-mtc=on'];
+        const zipArgs = out => ['a', '-tzip', out, path.join(BUILD_DIR, 'src'), '-mx=3', '-mtc=on'];
         let zipCode = await exec.exec('7z', zipArgs(zipPath), {ignoreReturnCode: true});
         if (zipCode > 1 && zipDir !== FALLBACK_SCRATCH) {
-            console.log(`7z failed on ${zipDir} (exit ${zipCode}), retrying on C:...`);
+            console.log(`7z failed on ${zipDir} (exit ${zipCode}), retrying in ${FALLBACK_SCRATCH}...`);
             await io.rmRF(zipDir);
             zipDir = FALLBACK_SCRATCH;
             zipPath = path.join(zipDir, 'artifacts.zip');

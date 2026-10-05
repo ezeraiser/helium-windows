@@ -6,7 +6,24 @@ runs:
     - name: Record job start
       shell: pwsh
       run: '"HELIUM_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV'
+    - name: Select build disk
+      shell: pwsh
+      run: |
+        # The build tree and the archives it is saved in are ~150 GB. Put the tree on whichever
+        # of C: and D: has more free space (D: is the runner's temp disk and may be missing or
+        # small). Only a tree on C: needs the cleanup steps below, which are what makes room
+        # there; with D: chosen they are skipped.
+        $cFree = (Get-PSDrive C).Free
+        $dFree = 0
+        if (Test-Path 'D:\') { $dFree = (Get-PSDrive D -ErrorAction SilentlyContinue).Free }
+        $gb = { param($b) [math]::Round($b / 1GB, 2) }
+        Write-Host "Free space: C: $(& $gb $cFree) GB, D: $(& $gb $dFree) GB"
+        if ($dFree -gt $cFree) { $drive = 'D' } else { $drive = 'C' }
+        Write-Host "Building on $drive`:"
+        "HELIUM_DRIVE=$drive" >> $env:GITHUB_ENV
+        "HELIUM_ROOT=$drive`:\helium-windows" >> $env:GITHUB_ENV
     - name: Free disk space
+      if: env.HELIUM_DRIVE == 'C'
       shell: pwsh
       run: |
         Write-Host "=== Before cleanup ==="
@@ -48,6 +65,7 @@ runs:
         # Best-effort cleanup: a failed rmdir must not fail the step via the last exit code.
         $global:LASTEXITCODE = 0
     - name: Clean temp and system temp directories
+      if: env.HELIUM_DRIVE == 'C'
       shell: pwsh
       run: |
         Write-Host "=== Cleaning temp directories ==="
@@ -66,6 +84,7 @@ runs:
         }
         Get-PSDrive C | Select-Object Used, Free
     - name: Clear Event Logs
+      if: env.HELIUM_DRIVE == 'C'
       shell: pwsh
       run: |
         Write-Host "=== Clearing Event Logs ==="
@@ -110,16 +129,16 @@ runs:
     - name: Init
       shell: pwsh
       run: |
-        if (Test-Path "C:\helium-windows") {
-          Remove-Item "C:\helium-windows" -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path "$env:HELIUM_ROOT") {
+          Remove-Item "$env:HELIUM_ROOT" -Recurse -Force -ErrorAction SilentlyContinue
         }
-        Copy-Item -Path . -Destination "C:\helium-windows" -Recurse
+        Copy-Item -Path . -Destination "$env:HELIUM_ROOT" -Recurse
     - name: Cleanup workspace copy after init
       shell: pwsh
       run: |
-        Write-Host "Cleaning up GitHub workspace after copying to C:\helium-windows"
-        # Remove the duplicate checkout in workspace since we now have C:\helium-windows
-        if ("$env:GITHUB_WORKSPACE" -ne "C:\helium-windows") {
+        Write-Host "Cleaning up GitHub workspace after copying to $env:HELIUM_ROOT"
+        # Remove the duplicate checkout in workspace since we now have $env:HELIUM_ROOT
+        if ("$env:GITHUB_WORKSPACE" -ne "$env:HELIUM_ROOT") {
           Get-ChildItem "$env:GITHUB_WORKSPACE" -Force -Recurse -ErrorAction SilentlyContinue | 
             Where-Object { -not ($_.PSPath -like "*\.git*") } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
