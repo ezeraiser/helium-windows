@@ -156,6 +156,16 @@ our own commits go to `ezeraiser/helium` and `ezeraiser/helium-windows`.
   OEM one; on Turkish Windows (cp1254 vs cp857) that is a `UnicodeDecodeError`
   and fails the build early. One added `errors='replace'`; the action itself
   must not be skipped.
+- **`midl-no-placeholder-in-source.patch`** -- `build/toolchain/win/midl.py`
+  used to create an empty placeholder for a *pruned* `.tlb` inside the **source**
+  directory `third_party/win_build_output/midl/...`. If that action was
+  interrupted (Siso cancels running actions at the build's first failure, or a
+  CI stage hits its time limit), the empty file stayed, the next run took it
+  for a populated output and failed in `overwrite_guids()` (`assert
+  contents[0:8] == b'MSFT...'`) for the IDLs with dynamic GUIDs. Now the
+  placeholder is created in the output directory only and a zero-size source
+  file counts as missing. If you ever see that assertion on an older tree,
+  delete the zero-byte `.tlb` files under `third_party/win_build_output`.
 - `helium/hop/disable-password-manager.patch` was **removed** from the Helium
   patch set (it force-disabled Password Manager via an opinionated policy
   provider).
