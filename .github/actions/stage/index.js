@@ -163,12 +163,14 @@ async function run() {
             }
         }
 
+        // The GitHub workspace is emptied after the repo is copied to C:\helium-windows
+        // (see prepare-environment), so the checkout has to be read from the copy.
         const { exitCode, stdout } = await exec.getExecOutput('python', [
             'helium-chromium\\utils\\helium_version.py',
             '--print',
             '--tree', 'helium-chromium',
             '--platform-tree', '.'
-        ]);
+        ], { cwd: 'C:\\helium-windows' });
 
         if (exitCode !== 0) throw `failed getting version: ${exitCode}`;
         core.setOutput('version', stdout.trim());
