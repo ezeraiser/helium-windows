@@ -68,9 +68,9 @@ runs:
       with:
         name: helium-windows-${{ inputs.arch }}-symbols
         path: |
-          C:\helium-windows\build\src\out\Default\*.pdb
-          C:\helium-windows\build\src\out\Default\*.exe
-          C:\helium-windows\build\src\out\Default\*.dll
+          ${{ env.HELIUM_ROOT }}\build\src\out\Default\*.pdb
+          ${{ env.HELIUM_ROOT }}\build\src\out\Default\*.exe
+          ${{ env.HELIUM_ROOT }}\build\src\out\Default\*.dll
         if-no-files-found: error
         retention-days: 4
         overwrite: true
