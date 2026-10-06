@@ -267,6 +267,13 @@ Other local-only (`not args.ci`) behaviour of `build.py` worth knowing:
 - **`args.gn` is rewritten only when its content changes, and `gn gen` runs
   only after the tree or the GN args changed** (or `build.ninja` is missing);
   `build.ninja` regenerates itself for plain BUILD.gn edits.
+  Because `args.gn` is already on disk when `gn gen` runs, a run that changed
+  either writes `out/Default/.helium_gn_gen_owed` first and deletes it only after
+  `gn gen` succeeded, so a failed/interrupted `gn gen` is retried next run
+  (the marker is written *before* `args.gn`; local runs only, never in CI).
+- The in-place patch update reverses with `fuzz=False` (a guessed reverse could
+  leave a wrong tree that is then recorded as current) and, on any failure,
+  also drops the saved `applied_patches` record before falling back.
 - **Pruning ignores missing `third_party/chromium-bidi/node_modules/` files.**
   CI validates the source file lists against the official lite tarball, which
   ships that directory; the tree `clone.py` produces does not have it.

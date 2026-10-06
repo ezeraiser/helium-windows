@@ -302,14 +302,23 @@ def _try_incremental_patch_update(root_dir, args, source_tree, cache_dir, finger
     fingerprint_path.write_text('incremental-patch-update-in-progress\n', encoding=ENCODING)
     try:
         if old_tail:
+            # Without fuzz: a reverse that only "works" by guessing could leave
+            # a subtly wrong tree that is then recorded as current.
             patches.apply_patches(
                 [cache_dir / _APPLIED_PATCHES_DIR / entry['file'] for entry in old_tail],
-                source_tree, reverse=True, patch_bin_path=patch_bin)
+                source_tree, reverse=True, patch_bin_path=patch_bin, fuzz=False)
         if new_tail:
             patches.apply_patches([entry['path'] for entry in new_tail], source_tree,
                                   patch_bin_path=patch_bin)
-    except (subprocess.CalledProcessError, OSError, ValueError) as exc:
+    except Exception as exc:  # pylint: disable=broad-except
+        # Whatever went wrong, the tree may be half-patched and the fingerprint
+        # already invalid, so the caller prepares from scratch. (An interrupt,
+        # a BaseException, takes the same road on the next run: the fingerprint
+        # file does not match.) The record of applied patches is dropped so it
+        # can never be paired with a tree it does not describe.
         logger.warning('Updating the patches in place failed (%s); preparing from scratch.', exc)
+        shutil.rmtree(cache_dir / _APPLIED_PATCHES_DIR, ignore_errors=True)
+        (cache_dir / _APPLIED_PATCHES_RECORD).unlink(missing_ok=True)
         return False
 
     _save_applied_patches(cache_dir, new)
@@ -403,8 +412,15 @@ def _check_downloads_cached(download_info, cache_dir, components, enabled):
 
     def fingerprint(name, props):
         stat = (cache_dir / props.download_filename).stat()
-        hashes = sorted(str(pair) for pair in downloads._get_hash_pairs(props, cache_dir))
-        digest = hashlib.sha256(repr(hashes).encode(ENCODING)).hexdigest()
+        # The expected hashes, from the public `hashes` mapping. A `hash_url`
+        # entry points at a file of hashes in the cache, so what that file
+        # says is part of what was verified.
+        expected = []
+        for kind, value in sorted(props.hashes.items()):
+            if kind == 'hash_url':
+                value = hashlib.sha256((cache_dir / value[1]).read_bytes()).hexdigest()
+            expected.append((kind, str(value)))
+        digest = hashlib.sha256(repr(expected).encode(ENCODING)).hexdigest()
         return [stat.st_size, stat.st_mtime_ns, digest]
 
     pending, stamps = [], {}
@@ -413,10 +429,12 @@ def _check_downloads_cached(download_info, cache_dir, components, enabled):
             continue
         try:
             stamps[name] = fingerprint(name, props)
-        except OSError:
-            pending.append(name)  # missing file: let check_downloads report it
+        except (OSError, LookupError, TypeError, ValueError):
+            # Missing file, or hashes in a shape this does not know: let
+            # check_downloads verify (and report) it the usual way.
+            pending.append(name)
             continue
-        if record.get(props.download_filename) != stamps[name]:
+        if record.get(name) != stamps[name]:
             pending.append(name)
 
     skipped = len(stamps) - len([n for n in pending if n in stamps])
@@ -427,8 +445,8 @@ def _check_downloads_cached(download_info, cache_dir, components, enabled):
         for name in pending:
             props = download_info[name]
             try:
-                record[props.download_filename] = fingerprint(name, props)
-            except OSError:
+                record[name] = fingerprint(name, props)
+            except (OSError, LookupError, TypeError, ValueError):
                 pass
         try:
             record_path.write_text(json.dumps(record), encoding=ENCODING)
@@ -943,6 +961,7 @@ def main():
     formatter.symlink_to(clang_format)
 
     args_gn_changed = False
+    gn_gen_owed_marker = source_tree / 'out/Default/.helium_gn_gen_owed'
     if not args.ci or not (source_tree / 'out/Default').exists():
         # Output args.gn
         (source_tree / 'out/Default').mkdir(parents=True, exist_ok=True)
@@ -997,8 +1016,20 @@ def main():
         previous_args = (args_gn.read_text(encoding=ENCODING).replace('\r\n', '\n')
                          if args_gn.exists() else None)
         if previous_args != gn_flags.replace('\r\n', '\n'):
+            # The marker goes first: if this stops between the two writes, the
+            # next run still knows `gn gen` is owed.
+            if not args.ci:
+                gn_gen_owed_marker.write_text('', encoding=ENCODING)
             args_gn.write_text(gn_flags, encoding=ENCODING)
             args_gn_changed = True
+
+    # `gn gen` is owed whenever this run changed the tree or args.gn. Remember
+    # that on disk until it succeeded: args.gn is already written by now, so if
+    # `gn gen` fails or is interrupted, the next run would otherwise see an
+    # unchanged args.gn and build with the stale build.ninja.
+    if not args.ci and tree_changed:
+        gn_gen_owed_marker.parent.mkdir(parents=True, exist_ok=True)
+        gn_gen_owed_marker.write_text('', encoding=ENCODING)
 
     # Enter source tree to run build commands
     os.chdir(source_tree)
@@ -1026,7 +1057,8 @@ def main():
     # run only needs an explicit `gn gen` after this run changed the tree, the GN
     # args or the Python interpreter; CI only when there is no build.ninja yet.
     if (not os.path.exists('out\\Default\\build.ninja')
-            or (not args.ci and (tree_changed or args_gn_changed or script_executable_changed))):
+            or (not args.ci and (tree_changed or args_gn_changed or script_executable_changed
+                                 or gn_gen_owed_marker.exists()))):
         # Run gn gen
         _run_build_process(
             'buildtools\\win\\gn.exe', 'gen', 'out\\Default', '--fail-on-unused-args',
@@ -1034,6 +1066,7 @@ def main():
         if gn_script_args:
             script_executable_marker.parent.mkdir(parents=True, exist_ok=True)
             script_executable_marker.write_text(script_executable, encoding=ENCODING)
+        gn_gen_owed_marker.unlink(missing_ok=True)
 
     # Ninja commandline
     os.environ['SISO_PATH'] = str(source_tree / 'third_party/siso/cipd/siso.exe')
