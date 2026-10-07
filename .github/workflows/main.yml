@@ -64,5 +64,6 @@ jobs:
       - uses: ./.github/actions/release
         with:
           version: ${{ steps.version.outputs.version }}
+          arch: ${{ inputs.arch }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

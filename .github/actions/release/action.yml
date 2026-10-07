@@ -1,21 +1,21 @@
 name: Publish Windows release
-description: Download both architecture packages and publish a prerelease with changelogs
+description: Download the package of the architecture that was built and publish a prerelease with changelogs
 inputs:
   version:
     description: Version to use for the release and tag
     required: true
+  arch:
+    description: Architecture that was built (x86_64 or arm64); only its package is downloaded
+    required: true
 runs:
   using: composite
   steps:
+    # A run builds a single architecture, so only that artifact exists
+    # (helium-x86_64 or helium-arm64, see the stage action).
     - name: Download package
       uses: actions/download-artifact@v4
       with:
-        name: helium-x86_64
-        path: release-artifacts
-    - name: Download arm package
-      uses: actions/download-artifact@v4
-      with:
-        name: helium-arm64
+        name: helium-${{ inputs.arch }}
         path: release-artifacts
     - name: Create release notes
       shell: bash

@@ -188,6 +188,40 @@ our own commits go to `ezeraiser/helium` and `ezeraiser/helium-windows`.
   drop from ~210 MB to 3-18 MB. Opt-in `browser_when_hidden` pref also trims the
   browser and GPU processes once *every* page is hidden and idle (e.g. window
   minimized); those two are otherwise untouched and make up much of the total.
+  **Gotcha:** only `PageType::kTab`/`kExtension` pages decide "everything is
+  idle". Tab Search (`tab-search.top-chrome`) is reported `visible` all the time
+  and its type is `kUnknown` (not `kNonTabWebUI`, despite the enum comment) --
+  counting it kept the browser/GPU trim from ever firing. The policy logs why it
+  is waiting (`BackgroundTabTrim: ... wait for a page: type=... host=...`) and
+  when it trims, at INFO level; run with `--enable-logging=file --log-file=...`.
+  Measured on the standard profile: minimizing the window took the total from
+  ~480 MB to ~240 MB (browser 69 -> 17 MB, GPU 136 -> 10 MB).
+- **`tab-freezing-settings.patch`** -- Settings -> Performance -> "Freeze tabs
+  you are not using": Helium's own `helium/core/infinite-tab-freezing.patch`
+  turns Chromium's `InfiniteTabsFreezing` on (upstream: off), so hidden tabs
+  outside the N most recently used are frozen by `FreezingPolicy` and briefly
+  woken once per interval. This patch exposes it: the master switch is
+  Chromium's existing `performance_tuning.tab_freezing.enabled` pref, and two
+  new local-state prefs (`helium.performance.tab_freezing.protected_tabs`,
+  default 2 -- Chromium: 5; `...unfreeze_interval_seconds`, default 60) are
+  handed to `FreezingPolicy` by `TabFreezingPrefsApplier` (a `GraphOwned` in
+  `chrome/browser/performance_manager/policies/`) through
+  `features::SetInfiniteTabsFreezingOverrides()`; `freezing_policy.cc` reads
+  its three parameters through `features::GetInfiniteTabsFreezing*()` now.
+  Pages with a `CannotFreezeReason` (audio, notification permission, WebRTC,
+  web locks, loading, ...) are never frozen, so many chat/mail tabs are exempt.
+  **Gotchas:** (1) the limit can change at runtime, and
+  `MaybePopFromMostRecentlyUsedList()` used to pop a single entry per call,
+  so lowering it tripped the (fatal) `CHECK_LE` in
+  `CheckMostRecentlyUsedListSize()` -- it loops now. (2) The unfreeze duration
+  must never be 0 (`CHECK_GT(end_excl, now)`) and the interval must stay below
+  ~24 days (`RandIntInclusive(int)` of milliseconds); "never wake up" is
+  interval 24 h + duration 1 ms (the applier derives the duration from the
+  interval). (3) The same values can be tried without a rebuild with
+  `--enable-features=InfiniteTabsFreezing:num_protected_tabs/N/
+  unfreeze_interval/1m/unfreeze_duration/3s` as long as the prefs/overrides
+  are not set (the overrides win). Measured on 8 synthetic tabs: ~190 MB ->
+  ~150 MB of renderer memory with 2 protected tabs instead of 5.
 - `helium/hop/disable-password-manager.patch` was **removed** from the Helium
   patch set (it force-disabled Password Manager via an opinionated policy
   provider).
