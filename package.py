@@ -19,12 +19,14 @@ if sys.version_info.major < 3:
 import argparse
 import hashlib
 import importlib.util
+import os
 import platform
 import re
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'helium-chromium' / 'utils'))
@@ -149,7 +151,12 @@ def stage_build(build_outputs, seven_zip, arch=None, portable_only=False):
     if arch and arch != build_arch:
         raise ValueError(f'Build architecture {build_arch} does not match {arch}')
     # A new directory makes reruns independent of partially signed old releases.
-    work = Path(tempfile.mkdtemp(prefix='signing-', dir=_ROOT_DIR / 'build'))
+    # Not tempfile.mkdtemp(): on Windows (Python 3.12+) it restricts the ACL to SYSTEM,
+    # Administrators and the owner, which locks you out of the folder from a normal
+    # Explorer when the build ran in an elevated shell. A plain mkdir inherits the
+    # permissions of build/.
+    work = _ROOT_DIR / 'build' / f'signing-{time.strftime("%Y%m%d-%H%M%S")}-{os.getpid()}'
+    work.mkdir()
     portable = work / 'portable'
     portable.mkdir()
     for rel in portable_files(build_outputs):

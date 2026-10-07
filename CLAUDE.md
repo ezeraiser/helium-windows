@@ -166,6 +166,28 @@ our own commits go to `ezeraiser/helium` and `ezeraiser/helium-windows`.
   placeholder is created in the output directory only and a zero-size source
   file counts as missing. If you ever see that assertion on an older tree,
   delete the zero-byte `.tlb` files under `third_party/win_build_output`.
+- **`bookmark-sidebar.patch`** -- `BookmarkSidebarView` (new files under
+  `chrome/browser/ui/views/frame/`): an icon strip of the bookmark bar's items
+  docked left/right/top/bottom, laid out by `BrowserViewTabbedLayoutImpl`; the
+  horizontal bookmark bar is hidden (in normal windows only) while it is on.
+  Separators are ordinary bookmarks with the URL `about:blank#helium-separator`.
+  Right click uses the browser's own `BookmarkContextMenu` (subclassed, the
+  sidebar's items appended); drag and drop reorders via
+  `BookmarkUIOperationsHelperMergedSurfaces::DropBookmarks`, like the bar.
+  **Gotchas:** the bookmark tree's *root node has id 0* -- never look up "id 0"
+  to mean "nothing" (`GetBookmarkNodeByID(model, 0)` returns the root, and the
+  browser menu then `CHECK`-crashes in `GetParentForNewNodes`). Official builds
+  print no `CHECK` message and crashpad is disabled, so to find such a crash
+  run the browser under a debugger and symbolize the stack against
+  `out/Default/chrome.dll.pdb` with dbghelp (`SymFromAddrW`; `llvm-symbolizer`
+  does not read this PDB).
+- **`background-tab-memory-trim.patch`** -- `BackgroundTabTrimPolicy`
+  (performance manager): empties the working set of a renderer once all of its
+  pages have been hidden and idle for N seconds (Settings -> Performance;
+  Windows only, `SetProcessWorkingSetSize(-1, -1)`). Measured: hidden renderers
+  drop from ~210 MB to 3-18 MB. Opt-in `browser_when_hidden` pref also trims the
+  browser and GPU processes once *every* page is hidden and idle (e.g. window
+  minimized); those two are otherwise untouched and make up much of the total.
 - `helium/hop/disable-password-manager.patch` was **removed** from the Helium
   patch set (it force-disabled Password Manager via an opinionated policy
   provider).
@@ -299,6 +321,36 @@ Other local-only (`not args.ci`) behaviour of `build.py` worth knowing:
 5. Do one final normal (non-`--dev`) build before treating anything as
    release-ready — `--dev` skips domain/name substitution, i18n, PGO, and
    uses a non-representative (component, unoptimized) binary layout.
+
+## `quick.py`: the fast loop for `patches/ezer/` changes
+
+`python build.py` re-prepares the whole tree whenever any patch changed (about
+an hour and a half) and recompiles most of it. For edits to `patches/ezer/*`
+use `quick.py` instead; it updates the *already prepared* `build/src` in place
+and compiles only what changed:
+
+- `python quick.py check` -- sync, then compile just the `.cc` files of the
+  changed patches (seconds to a few minutes; catches compile errors early).
+  `--all` compiles every `.cc` any ezer patch touches.
+- `python quick.py build [--package]` -- sync, then `autoninja chrome`
+  (`-j 8` by default, `-j N` to change) and optionally the unsigned x64 ZIP.
+- `python quick.py sync` -- only update the tree. `python quick.py adopt` --
+  declare that `build/src` already contains the current patches (only after
+  editing `build/src` by hand to match them).
+
+How it works: the patches `build.py` applied are saved in
+`build/download_cache/applied_patches`. `sync` reverses the saved copies of the
+changed patches **plus any later patch that touches the same files** (strictly,
+no fuzz) and applies the current versions; patches on other files stay
+applied. It is all-or-nothing (touched files are backed up and restored if a
+hunk fails). It runs ninja inside the Visual Studio environment like
+`build.py` does (a changed `BUILD.gn` makes ninja re-run `gn`, which only finds
+the toolchain there), applies the Turkish translations of changed i18n files
+into the XTBs, and never touches `prepare_fingerprint.txt`: a later plain
+`python build.py` still prepares from scratch, which stays the reference for
+anything released (domain/name substitution and PGO only happen there). It
+refuses (use `build.py`) when more than 25 patches are affected, e.g. after an
+imputnet sync.
 
 ## `check_ezer_patches.py`
 
