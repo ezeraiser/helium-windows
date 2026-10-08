@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'helium-chromium' / 'utils'))
 import patches
+import prune_binaries
 from _common import get_logger, get_chromium_version, parse_series
 sys.path.pop(0)
 
@@ -72,6 +73,10 @@ def main():
     chromium_version = get_chromium_version()
     get_logger().info('Resetting build/src to a clean %s checkout...', chromium_version)
     _clear_readonly_tree(source_tree)
+    # With Git for Windows' default core.autocrlf=true, the reset below would write every file
+    # that differs between two Chromium versions with CRLF line endings, and the patches
+    # (LF) then fail with "different line endings".
+    subprocess.run(['git', 'config', 'core.autocrlf', 'false'], cwd=source_tree, check=True)
     subprocess.run(['git', 'fetch', 'origin', 'tag', chromium_version, '--depth=2'],
                    cwd=source_tree, check=True)
     subprocess.run(['git', 'reset', '--hard', 'FETCH_HEAD'], cwd=source_tree, check=True)
@@ -84,12 +89,33 @@ def main():
     # this session) instead.
     patch_bin_path = None
 
-    get_logger().info('Applying %d non-ezer patch(es) as a baseline...', len(other_patches))
-    patches.apply_patches(
-        (patches_dir / p for p in other_patches),
+    # Some baseline patches (e.g. ungoogled-chromium/fix-building-with-prunned-binaries.patch)
+    # only apply to a pruned tree, matching build.py's order: download -> prune -> patch.
+    # Files that pruning.list names but this tree lacks (DEPS-downloaded content such as
+    # chromium-bidi's node_modules) are legitimately absent here, same as in build.py.
+    get_logger().info('Pruning binaries (pruning.list)...')
+    prune_binaries.prune_files(
         source_tree,
-        patch_bin_path=patch_bin_path,
-    )
+        (_ROOT_DIR / 'helium-chromium' / 'pruning.list').read_text(
+            encoding='UTF-8').splitlines())
+
+    # Apply one at a time: a few baseline patches (devtools-frontend, puffin,
+    # search-engine-data) depend on DEPS-downloaded content that this shortcut never
+    # unpacks, so they are expected to fail. Don't let that stop the ezer check, but
+    # list them, since an ezer patch that touches the same files may then fail too.
+    get_logger().info('Applying %d non-ezer patch(es) as a baseline...', len(other_patches))
+    baseline_failures = []
+    for other_patch in other_patches:
+        try:
+            patches.apply_patches([patches_dir / other_patch], source_tree,
+                                  patch_bin_path=patch_bin_path)
+        except subprocess.CalledProcessError:
+            baseline_failures.append(other_patch)
+    if baseline_failures:
+        get_logger().warning(
+            '%d baseline patch(es) did not apply (expected for patches needing DEPS '
+            'content): %s', len(baseline_failures),
+            ', '.join(str(f) for f in baseline_failures))
 
     get_logger().info("Checking %d ezer/ patch(es)...", len(ezer_patches))
     failures = []
@@ -98,6 +124,10 @@ def main():
         code, out, err = patches.dry_run_check(patch_path, source_tree, patch_bin_path=patch_bin_path)
         if code == 0:
             get_logger().info('  OK    %s', ezer_patch)
+            # ezer patches stack (several touch settings_strings.grdp, appearance_page.ts,
+            # prefs_util.cc...): apply each one that checks out so the next is checked
+            # against the tree it will really see, not against the bare baseline.
+            patches.apply_patches([patch_path], source_tree, patch_bin_path=patch_bin_path)
         else:
             failures.append(ezer_patch)
             get_logger().error('  FAIL  %s', ezer_patch)

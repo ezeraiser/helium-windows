@@ -399,7 +399,19 @@ It resets an existing `build/src` checkout to a clean `chromium_version`,
 applies every *non*-`ezer` patch as a baseline, then strictly dry-run checks
 only `patches/ezer/*.patch`. Catches a broken ezer patch in minutes instead of
 after a multi-hour clone+build cycle. Requires `build/src` to already exist
-(run `build.py` at least once first).
+(run `build.py` at least once first). Since the 155 sync it also prunes with
+`pruning.list` first, applies the non-ezer patches one by one (the ~12 that need
+DEPS-downloaded content just fail and are listed as a warning), applies each
+ezer patch that checks out so the next one is checked against the stack it will
+really see (several share `settings_strings.grdp`, `appearance_page.ts`,
+`prefs_util.cc`), and forces `core.autocrlf=false` in `build/src` (with
+`true`, `git reset --hard` wrote every file that differs between two Chromium
+versions as CRLF and the LF patches failed with "different line endings").
+**It resets `build/src`: the compiled `out/Default` is deleted.** Its dry run is
+GNU `patch`, i.e. tolerant of offset/fuzz; to get what CI's strict validator
+needs, regenerate each failing or shifted file section (apply it with `-F3` to a
+copy, re-`diff -U3`, splice the hunks back) and verify the whole series with
+`patch -p1 --fuzz=0` in series order, then reverse it all again.
 
 If you reach for this script's *technique* by hand -- rebuilding a
 "non-ezer-patches-only" baseline to diff a `build/src` with accumulated
@@ -510,6 +522,40 @@ browser process) that mirrors the pref into a registry value via
 `nt::CreateRegKey`/a plain `RegSetValueExW` call, and have the early
 `chrome_elf`-level code read that same registry value directly (e.g. via
 `nt::QueryRegValueDWORD`) instead of any command-line switch.
+
+## Speedometer 3.1: what was measured, what not to retry
+
+Measured on 0.18.3.1 (Chromium 154.0.8037.97, full official build, PGO=2):
+
+- **There is no engine/build performance problem.** Manual runs on the same
+  machine: Helium 22.2 (uBlock Origin off) vs. ungoogled-chromium 22.3 (off);
+  Edge 22.7 (off). The only large effect is the built-in **uBlock Origin**:
+  -0.9 in Helium (22.2 -> 21.3), -1.1 in Edge (22.7 -> 21.6), i.e. the usual
+  cost of a content-script blocker on a DOM-heavy synthetic benchmark. Edge's
+  remaining ~0.5 is most likely server-side Finch experiments, which Helium
+  does not receive (ungoogled removes the variations request) -- not
+  recoverable. Building for AVX2 / x86-64-v3 would not help either (V8 picks
+  CPU features at run time; expected <= 1-2%, and it would break older CPUs).
+- **No V8/GC flag moved the score.** 7 candidates, 3 interleaved runs each
+  against a baseline (`--js-flags=` unless noted): `--always-sparkplug`,
+  `--no-lazy-feedback-allocation`, `--max-lazy`, `--turbolev`, `--minor-ms`,
+  `--max-inlined-bytecode-size=920`, and
+  `--enable-features=V8ScavengerHigherCapacity`. Medians were 20.3-20.9 vs. a
+  baseline of 20.4-20.8, all inside the noise band. Don't put any of them in
+  a patch. Maglev/Turbofan/Sparkplug defaults in this V8 are already on.
+- **Noise is about +-0.7 per run** (single baseline runs ranged 20.4-21.9), so
+  take >= 3 interleaved (ABAB) runs per configuration and ignore differences
+  under ~0.7. Automated absolute scores (~20.5 here) came out ~1.5 lower than
+  manual ones (CDP attached, fresh cold profile), so compare only within one
+  batch.
+- **`--disable-extensions` does not disable the built-in uBlock Origin**
+  (it is a component extension). To measure "uBO off" disable it by hand in
+  `chrome://extensions`, or the numbers silently include it.
+- Method, if it has to be repeated: launch `out/Default/chrome.exe` with a
+  fresh `--user-data-dir` and `--remote-debugging-port`, open
+  `https://browserbench.org/Speedometer3.1/?startAutomatically`, poll
+  `#result-number` over CDP (Node's built-in `WebSocket` is enough); the
+  harness was a throwaway script and is not in the repo.
 
 ## CI structure
 
