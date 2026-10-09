@@ -12,7 +12,7 @@ on:
       ntfs-compression:
         required: false
         type: boolean
-        default: true
+        default: false
     secrets:
       # Optional: without them, signing.py produces unsigned packages instead
       # of failing. Forks generally don't have these configured.

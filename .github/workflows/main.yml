@@ -22,7 +22,7 @@ on:
         required: false
         type: boolean
         description: 'Use NTFS compression on the build directory (saves disk space, costs build time)'
-        default: true
+        default: false
 
 permissions:
   contents: read

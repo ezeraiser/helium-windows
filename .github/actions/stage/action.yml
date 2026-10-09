@@ -24,7 +24,7 @@ inputs:
   ntfs_compression:
     description: Compress the build directory with NTFS compression (saves disk space, costs build time)
     required: false
-    default: true
+    default: false
 outputs:
   finished:
     description: If a previous stage already finished the build, the stage will set all output variables to the input ones and exit
