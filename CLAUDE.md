@@ -196,6 +196,23 @@ our own commits go to `ezeraiser/helium` and `ezeraiser/helium-windows`.
   when it trims, at INFO level; run with `--enable-logging=file --log-file=...`.
   Measured on the standard profile: minimizing the window took the total from
   ~480 MB to ~240 MB (browser 69 -> 17 MB, GPU 136 -> 10 MB).
+  **Media rule (2026-10-09):** only the process of the tab that plays sound is
+  exempt; nothing else is held back by it. `AllPagesIdle()` used to be a global
+  gate (any audible page kept the browser/GPU untrimmed, and nothing was ever
+  re-trimmed), which let a background music tab bloat everything else; now
+  `PageKeepsBrowserBusy()` only counts visible pages, Picture-in-Picture and
+  video/window/display capture or mirroring (something is being drawn or
+  encoded). New local-state prefs, all in Settings -> Performance: 
+  `...background_tab_trim.while_media_plays` (default on),
+  `...helper_processes` (default on: utility processes and spare renderers are
+  trimmed with the browser/GPU; utility processes are skipped while any page is
+  audible because the audio service cannot be told apart) and
+  `...repeat_seconds` (default 600; while nothing is in sight everything,
+  renderers and browser/GPU alike, is trimmed again this often, 0 = never).
+  **Not built or run locally** (no compiled tree): the change was verified only
+  by strict patch application of the whole `patches/ezer` series and by reading
+  the Chromium headers it uses; check the first CI build and a real session.
+  The Firefox counterpart and its measurements live in `../Firefox-Tweaks`.
 - **`tab-freezing-settings.patch`** -- Settings -> Performance -> "Freeze tabs
   you are not using": Helium's own `helium/core/infinite-tab-freezing.patch`
   turns Chromium's `InfiniteTabsFreezing` on (upstream: off), so hidden tabs
