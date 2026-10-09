@@ -811,11 +811,16 @@ def main():
             source_tree,
             pruning_list.read_text(encoding=ENCODING).splitlines()
         )
-        # The source file lists are validated in CI against the official lite tarball,
-        # which ships third_party/chromium-bidi/node_modules; the tree cloned above does
-        # not have it, so its entries in pruning.list are legitimately absent here.
-        unremovable_files = {f for f in unremovable_files
-                             if not f.startswith('third_party/chromium-bidi/node_modules/')}
+        # pruning.list is validated in CI against the official lite tarball, which ships
+        # third_party/chromium-bidi/node_modules and the Linux-only third_party trees
+        # (wayland-protocols, pyelftools, libdrm, ...). The tree cloned above is a
+        # Windows "small" checkout without them, so those entries are legitimately
+        # absent here. Only a file that exists and still could not be removed is an error.
+        absent_files = {f for f in unremovable_files if not (source_tree / f).exists()}
+        unremovable_files = unremovable_files - absent_files
+        if absent_files:
+            get_logger().info('%d pruning.list entries are not in this checkout (fine).',
+                              len(absent_files))
         if unremovable_files:
             get_logger().error('Files could not be pruned: %s', unremovable_files)
             parser.exit(1)

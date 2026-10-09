@@ -348,9 +348,8 @@ Other local-only (`not args.ci`) behaviour of `build.py` worth knowing:
 - The in-place patch update reverses with `fuzz=False` (a guessed reverse could
   leave a wrong tree that is then recorded as current) and, on any failure,
   also drops the saved `applied_patches` record before falling back.
-- **Pruning ignores missing `third_party/chromium-bidi/node_modules/` files.**
-  CI validates the source file lists against the official lite tarball, which
-  ships that directory; the tree `clone.py` produces does not have it.
+- **Pruning ignores `pruning.list` entries that are absent from the tree.**
+  CI validates the lists against the official lite tarball, which ships `third_party/chromium-bidi/node_modules/` and Linux-only trees (`wayland-protocols`, `pyelftools`, `libdrm`, `fontconfig/src/test`, ...). Since the 0.19.2 sync `clone.py` uses gclient with `checkout_configuration: small` for Windows, so those files do not exist and `prune_files()` reports them. `build.py` drops every unremovable file that does not exist; one that exists and cannot be removed is still an error.
 
 **The actual fast local workflow to suggest:**
 1. First do one full normal build (`python build.py`), so `build/src` is
