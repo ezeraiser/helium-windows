@@ -236,7 +236,7 @@ def sync():
 # Files `check` verifies: .cc (compile) and .ts (ESLint + tsc of the WebUI that contains them).
 CHECKED_SUFFIXES = ('.cc', '.ts')
 # GN target whose build runs ESLint and tsc for the files under a directory.
-TS_TARGETS = {'chrome/browser/resources/settings/': 'chrome/browser/resources/settings:build_ts'}
+TS_TARGETS = {'chrome/browser/resources/settings/': 'chrome/browser/resources/settings:lint_ts'}
 
 
 def ts_target(rel):
@@ -388,7 +388,7 @@ def main():
         targets += sorted({ts_target(p) for p in ts_files} - {None})
         if not targets:
             return 0
-        print('Checking (compile for .obj, ESLint + tsc for :build_ts):', *targets, sep='\n  ')
+        print('Checking (compile for .obj, type-aware ESLint for :lint_ts):', *targets, sep='\n  ')
         code = run_ninja(targets, args.jobs)
         print('quick check: OK' if code == 0 else 'quick check: FAILED')
         if code == 0:

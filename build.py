@@ -717,8 +717,8 @@ def main():
         '--check',
         action='store_true',
         help=('Quick check instead of a full build: prepare the tree as usual, then only '
-              'build the Settings WebUI TypeScript (ESLint and the TypeScript compiler run '
-              'there) and the object files of every .cc file the patches in '
+              'build the Settings WebUI lint target (type-aware ESLint, which depends on '
+              'the TypeScript build) and the object files of every .cc file the patches in '
               'helium-chromium/patches/ezer add or change. Finds lint and compile errors '
               'of our own patches without compiling Chromium. Used by the "Quick check" '
               'workflow.')
@@ -1125,11 +1125,12 @@ def main():
     ninja_commandline.append('out\\Default')
 
     if args.check:
-        # Settings WebUI TypeScript (ESLint + tsc) and the objects of our own .cc files.
+        # Settings WebUI lint (type-aware ESLint, which also builds the TypeScript) and the
+        # objects of our own .cc files.
         objects, missing = _object_targets(source_tree, _ezer_cc_files())
         if missing:
             print('WARNING: no compile rule found for (not part of this build?):', *missing)
-        ninja_commandline.append('chrome/browser/resources/settings:build_ts')
+        ninja_commandline.append('chrome/browser/resources/settings:lint_ts')
         ninja_commandline.extend(objects)
         print('Quick check targets:', *ninja_commandline[-(len(objects) + 1):])
     else:

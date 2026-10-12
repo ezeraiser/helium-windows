@@ -2,7 +2,7 @@ name: Quick check (our patches)
 
 # Finds ESLint / TypeScript / compile errors of the patches in helium-chromium/patches/ezer
 # without compiling Chromium: the tree is prepared exactly like a release build (clone, patches,
-# prune, substitution, toolchains), then only the Settings WebUI TypeScript (where ESLint runs)
+# prune, substitution, toolchains), then only the Settings WebUI lint target (type-aware ESLint; it builds the TypeScript first)
 # and the object files of the .cc files our patches add or change are built. See `--check` in
 # build.py. Run it before starting a full build.
 on:
