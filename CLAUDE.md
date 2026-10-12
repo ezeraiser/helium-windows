@@ -403,6 +403,15 @@ anything released (domain/name substitution and PGO only happen there). It
 refuses (use `build.py`) when more than 25 patches are affected, e.g. after an
 imputnet sync.
 
+## Catching lint and compile errors before a release build
+
+Both CI-only failures so far (a misplaced `browser_view.cc` hunk, an ESLint `no-unnecessary-type-conversion` error in `system_page.ts`) were found only hours into a full build, because strict patch application proves nothing about C++ or TypeScript correctness, and ESLint needs Chromium's `node_modules`, which the local `build/src` does not have. Two ways to find them early:
+
+1. **`Quick check (our patches)` workflow** (`.github/workflows/quick-check.yml`, `workflow_dispatch`): prepares the tree like a release build, then `python build.py --ci <t> --check` builds only `chrome/browser/resources/settings:build_ts` (ESLint + tsc of the Settings WebUI) and the `.obj` of every `.cc` that `patches/ezer/*.patch` adds or changes (`_ezer_cc_files()` / `_object_targets()` in `build.py`). Needs the prepare (clone, toolchains) but no Chromium compile, so it ends well before a full build. **Never run on CI yet** -- the first run may need fixes. Settings WebUI targets other than `settings:build_ts` are not covered.
+2. **Local `quick.py check` on a CI tree:** download the `build-artifact-x86_64` artifact of a (partial or finished) CI run, extract its `artifacts.zip` into `build/` (it holds `build/src`, including `out/Default`), run `python quick.py adopt` once so the tree counts as prepared with the current patches, then `python quick.py check`. Untested: `adopt` may need a `build/download_cache` that CI trees lack.
+
+When reviewing a patch, ask for lint rules (no `!!` on a boolean, no unnecessary casts, unused imports) separately from compile errors, and say which of the two was actually *run* (only `--check` / a real build runs ESLint).
+
 ## `check_ezer_patches.py`
 
 Run this after every imputnet sync (fetch + fast-forward/merge in

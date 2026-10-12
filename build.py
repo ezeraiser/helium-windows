@@ -632,6 +632,38 @@ def _configure_remoteexec(source_tree):
     ], check=True)
 
 
+def _ezer_cc_files():
+    """Source files (relative to the tree) that the patches in patches/ezer add or change."""
+    files = set()
+    for patch in sorted((_ROOT_DIR / 'helium-chromium' / 'patches' / 'ezer').glob('*.patch')):
+        for line in patch.read_text(encoding=ENCODING).splitlines():
+            if line.startswith('+++ b/') and line.endswith('.cc'):
+                files.add(line[len('+++ b/'):].strip())
+    return sorted(files)
+
+
+def _object_targets(source_tree, sources):
+    """Maps each source file to its object target by looking for its compile rule in the
+    .ninja files of its directory and the directories above (same idea as quick.py)."""
+    import re
+    out = source_tree / 'out' / 'Default'
+    targets, missing = [], []
+    for rel in sources:
+        pattern = re.compile(r'^build (obj/\S+?\.obj): cxx \.\./\.\./' + re.escape(rel) + r'\b',
+                             re.MULTILINE)
+        found = None
+        directory = Path(rel).parent
+        while found is None and str(directory) not in ('.', ''):
+            for ninja in sorted((out / 'obj' / directory).glob('*.ninja')):
+                match = pattern.search(ninja.read_text(encoding='utf-8', errors='replace'))
+                if match:
+                    found = match.group(1)
+                    break
+            directory = directory.parent
+        (targets if found else missing).append(found or rel)
+    return targets, missing
+
+
 def main():
     """CLI Entrypoint"""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -680,6 +712,16 @@ def main():
         '--portable-only',
         action='store_true',
         help=argparse.SUPPRESS  # the default now; still accepted so existing callers work
+    )
+    parser.add_argument(
+        '--check',
+        action='store_true',
+        help=('Quick check instead of a full build: prepare the tree as usual, then only '
+              'build the Settings WebUI TypeScript (ESLint and the TypeScript compiler run '
+              'there) and the object files of every .cc file the patches in '
+              'helium-chromium/patches/ezer add or change. Finds lint and compile errors '
+              'of our own patches without compiling Chromium. Used by the "Quick check" '
+              'workflow.')
     )
     args = parser.parse_args()
     args.portable_only = not args.installer
@@ -1082,12 +1124,21 @@ def main():
     ninja_commandline.append('-C')
     ninja_commandline.append('out\\Default')
 
-    # Finish all release targets before signing. Siso can replace signed outputs
-    # if it is invoked again to build their dependents (the mini installer).
-    ninja_commandline.append('chrome')
-    if not args.portable_only:
-        # chromedriver is not part of the portable ZIP (FILES.cfg lists it for 32bit only).
-        ninja_commandline.extend(['chromedriver', 'setup', 'mini_installer'])
+    if args.check:
+        # Settings WebUI TypeScript (ESLint + tsc) and the objects of our own .cc files.
+        objects, missing = _object_targets(source_tree, _ezer_cc_files())
+        if missing:
+            print('WARNING: no compile rule found for (not part of this build?):', *missing)
+        ninja_commandline.append('chrome/browser/resources/settings:build_ts')
+        ninja_commandline.extend(objects)
+        print('Quick check targets:', *ninja_commandline[-(len(objects) + 1):])
+    else:
+        # Finish all release targets before signing. Siso can replace signed outputs
+        # if it is invoked again to build their dependents (the mini installer).
+        ninja_commandline.append('chrome')
+        if not args.portable_only:
+            # chromedriver is not part of the portable ZIP (FILES.cfg lists it for 32bit only).
+            ninja_commandline.extend(['chromedriver', 'setup', 'mini_installer'])
 
     # Run ninja
     if args.ci:

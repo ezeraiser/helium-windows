@@ -1,0 +1,42 @@
+name: Quick check (our patches)
+
+# Finds ESLint / TypeScript / compile errors of the patches in helium-chromium/patches/ezer
+# without compiling Chromium: the tree is prepared exactly like a release build (clone, patches,
+# prune, substitution, toolchains), then only the Settings WebUI TypeScript (where ESLint runs)
+# and the object files of the .cc files our patches add or change are built. See `--check` in
+# build.py. Run it before starting a full build.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        required: false
+        description: 'Runner image name'
+        default: 'windows-2025'
+
+permissions:
+  contents: read
+
+env:
+  HELIUM_BUILD_JOBS: ${{ vars.HELIUM_BUILD_JOBS }}
+
+jobs:
+  check:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/prepare-environment
+      - name: Install build helpers
+        shell: pwsh
+        run: python -m pip install httplib2==0.22.0 Pillow clang-format
+      - name: Quick check
+        shell: pwsh
+        working-directory: ${{ env.HELIUM_ROOT }}
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          $jobs = @()
+          if ($env:HELIUM_BUILD_JOBS) { $jobs = @('-j', $env:HELIUM_BUILD_JOBS) }
+          python build.py --ci $env:HELIUM_JOB_STARTED_AT --check @jobs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
