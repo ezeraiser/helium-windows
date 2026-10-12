@@ -815,6 +815,13 @@ def main():
             # would otherwise wipe the rust/clang toolchains every time.
             _clear_readonly_tree(source_tree)
             _stash_toolchain_caches(source_tree, toolchain_cache)
+            # clone.py (gclient based, since the 0.19.2 sync) refuses a source directory that
+            # is not empty, where the older one reset it in place. A leftover tree (an earlier
+            # local prepare, check_ezer_patches.py, ...) is removed; the toolchains were moved
+            # out above and come back below, so they are not downloaded again.
+            if source_tree.exists() and (not source_tree.is_dir() or any(source_tree.iterdir())):
+                get_logger().info('build/src is not empty; removing it so clone.py can start fresh...')
+                rmtree(source_tree)
             subprocess.run([sys.executable, str(Path('helium-chromium', 'utils', 'clone.py')), '-o', 'build\\src', '-p', 'win-arm64' if args.arm else 'win64'], check=True)
             _restore_toolchain_caches(source_tree, toolchain_cache)
 

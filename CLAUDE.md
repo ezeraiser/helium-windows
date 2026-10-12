@@ -260,6 +260,7 @@ original bug first:
   carry their own version stamp and would otherwise skip re-downloading
   multi-GB toolchains when the version hasn't changed. Now moved out of
   `build/src` before the reset and back in after.
+- **Non-empty `build/src` is removed before cloning.** The gclient-based `clone.py` (since the 0.19.2 sync) exits with "source directory is not empty" where the old one reset an existing tree in place. `build.py` removes a leftover `build/src` after stashing the toolchains (they are restored afterwards), so a local prepare after `check_ezer_patches.py` or an interrupted prepare starts from a fresh clone.
 - **`_unpack_downloads_resilient()` / `_clear_stale_extraction_staging()`** —
   a previous interrupted build can leave a half-moved extraction staging
   directory behind in DEPS-downloaded (git-untracked) `third_party/*`
