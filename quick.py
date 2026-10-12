@@ -14,7 +14,7 @@ does, but also for a normal (non --dev) tree, and then only compiles what
 changed:
 
     python quick.py sync            undo/redo the changed patches in build/src
-    python quick.py check           sync, then compile just the changed .cc files
+    python quick.py check           sync, then compile the changed .cc files and run ESLint + tsc for changed Settings .ts files
     python quick.py build           sync, then `autoninja chrome`
     python quick.py build --package ... and package the portable x64 ZIP
     python quick.py adopt           declare that build/src already contains the
@@ -230,8 +230,20 @@ def sync():
     # Files only the old versions touched were reverted: they changed too.
     for text in texts[:len(saved)]:
         changed.update(touched_files(text))
-    return sorted(p for p in changed if p.endswith('.cc') and (SOURCE / p).exists())
+    return sorted(p for p in changed if p.endswith(CHECKED_SUFFIXES) and (SOURCE / p).exists())
 
+
+# Files `check` verifies: .cc (compile) and .ts (ESLint + tsc of the WebUI that contains them).
+CHECKED_SUFFIXES = ('.cc', '.ts')
+# GN target whose build runs ESLint and tsc for the files under a directory.
+TS_TARGETS = {'chrome/browser/resources/settings/': 'chrome/browser/resources/settings:build_ts'}
+
+
+def ts_target(rel):
+    for prefix, target in TS_TARGETS.items():
+        if rel.startswith(prefix):
+            return target
+    return None
 
 def load_state():
     try:
@@ -356,24 +368,32 @@ def main():
         return 0
 
     if args.command == 'check':
-        sources = [p for p in pending if (SOURCE / p).exists()]
+        checked = [p for p in pending if (SOURCE / p).exists()]
         if args.all:
-            sources = sorted({p for e in hb._patch_entries(ROOT) if '/ezer/' in str(e['path']).replace('\\', '/')
+            checked = sorted({p for e in hb._patch_entries(ROOT)
+                              if '/ezer/' in str(e['path']).replace(chr(92), '/')
                               for p in touched_files(e['path'].read_text(encoding='utf-8'))
-                              if p.endswith('.cc') and (SOURCE / p).exists()})
-        if not sources:
-            print('No .cc file changed; nothing to compile (use --all, or `build`).')
+                              if p.endswith(CHECKED_SUFFIXES) and (SOURCE / p).exists()})
+        sources = [p for p in checked if p.endswith('.cc')]
+        ts_files = [p for p in checked if p.endswith('.ts')]
+        if not checked:
+            print('No .cc/.ts file changed; nothing to check (use --all, or `build`).')
             return 0
-        targets, missing = object_targets(sources)
+        targets, missing = object_targets(sources) if sources else ([], [])
         for rel in missing:
             print(f'  (no compile rule found for {rel}; it is checked by `build`)')
+        for rel in ts_files:
+            if ts_target(rel) is None:
+                print(f'  (no WebUI target known for {rel}; it is checked by `build`)')
+        targets += sorted({ts_target(p) for p in ts_files} - {None})
         if not targets:
             return 0
-        print('Compiling:', *targets, sep='\n  ')
+        print('Checking (compile for .obj, ESLint + tsc for :build_ts):', *targets, sep='\n  ')
         code = run_ninja(targets, args.jobs)
         print('quick check: OK' if code == 0 else 'quick check: FAILED')
         if code == 0:
-            state['pending_cc'] = [p for p in pending if p not in sources]
+            done = set(sources) | {p for p in ts_files if ts_target(p)}
+            state['pending_cc'] = [p for p in pending if p not in done]
             save_state(state)
         return code
 

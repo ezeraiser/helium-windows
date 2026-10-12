@@ -381,8 +381,13 @@ use `quick.py` instead; it updates the *already prepared* `build/src` in place
 and compiles only what changed:
 
 - `python quick.py check` -- sync, then compile just the `.cc` files of the
-  changed patches (seconds to a few minutes; catches compile errors early).
-  `--all` compiles every `.cc` any ezer patch touches.
+  changed patches and run ESLint + tsc (`chrome/browser/resources/settings:build_ts`)
+  when a changed patch touches a Settings `.ts` file (seconds to a few minutes;
+  catches compile and lint errors early). `--all` checks every `.cc`/`.ts` any ezer
+  patch touches -- run it before pushing. The tree needs the toolchain, `node_modules`
+  and `out/Default`: get them once with `python build.py --dev --check` (prepare + only
+  the check targets, no full Chromium compile). `check_ezer_patches.py` resets
+  `build/src` and deletes `out/`, so repeat that command after using it.
 - `python quick.py build [--package]` -- sync, then `autoninja chrome`
   (`-j 8` by default, `-j N` to change) and optionally the unsigned x64 ZIP.
 - `python quick.py sync` -- only update the tree. `python quick.py adopt` --
