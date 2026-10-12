@@ -612,9 +612,10 @@ Measured on 0.18.3.1 (Chromium 154.0.8037.97, full official build, PGO=2):
    push remote or open a PR against it.
 2. If `AGENTS.md`/`CLAUDE.md` reappear (imputnet restricts AI-agent use
    there), delete them again — this fork doesn't follow that restriction.
-3. Run `python check_ezer_patches.py` from `helium-windows` to catch drift in
+3. **Check what the sync changed in the scripts `build.py` calls**, not only in the patches: `git diff <old>..<new> -- helium-chromium/utils helium-chromium/*.ini helium-chromium/*.list`. For every changed interface (e.g. `utils/clone.py`: arguments, what it does with an existing `build/src`, which toolchains/hooks it now runs itself, `depot_tools.patch`/`gsutil.patch` removal) read the matching call in `build.py` and walk through BOTH paths: CI (fresh runner, empty `build/src`) and local (leftover `build/src`, stashed toolchains, `prepare_fingerprint`, `quick.py`). The 0.19.2 sync passed CI-style reasoning and still broke every local prepare (`clone.py` refuses a non-empty `build/src`). Then run `python build.py --dev --check` locally at least as far as the end of the prepare, before telling anyone the sync is done.
+4. Run `python check_ezer_patches.py` from `helium-windows` to catch drift in
    our own patches before committing to a full build.
-4. Fix any broken `patches/ezer/*` hunks (see rules above), regenerate
+5. Fix any broken `patches/ezer/*` hunks (see rules above), regenerate
    `i18n/source.gen.json` if needed.
-5. Commit in `helium-chromium`, push to `ezeraiser/helium`; bump the submodule
+6. Commit in `helium-chromium`, push to `ezeraiser/helium`; bump the submodule
    pointer in `helium-windows` and push to `ezeraiser/helium-windows`.
