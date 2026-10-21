@@ -4,7 +4,7 @@ name: Quick check (our patches)
 # without compiling Chromium: the tree is prepared exactly like a release build (clone, patches,
 # prune, substitution, toolchains), then only the Settings WebUI lint target (type-aware ESLint; it builds the TypeScript first)
 # and the object files of the .cc files our patches add or change are built. See `--check` in
-# build.py. Run it before starting a full build.
+# buildez.py. Run it before starting a full build.
 on:
   workflow_dispatch:
     inputs:
@@ -38,5 +38,5 @@ jobs:
           New-Item -ItemType Directory -Force -Path build | Out-Null
           $jobs = @()
           if ($env:HELIUM_BUILD_JOBS) { $jobs = @('-j', $env:HELIUM_BUILD_JOBS) }
-          python build.py --ci $env:HELIUM_JOB_STARTED_AT --check @jobs
+          python buildez.py --ci $env:HELIUM_JOB_STARTED_AT --check @jobs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

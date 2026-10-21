@@ -7,9 +7,9 @@
 """
 Fast loop for changes to `helium-chromium/patches/ezer/*.patch`.
 
-`python build.py` re-prepares the whole tree whenever a patch changed (about an
+`python buildez.py` re-prepares the whole tree whenever a patch changed (about an
 hour and a half) and then recompiles most of it. This script instead brings the
-already prepared `build/src` up to date *in place*, the way `build.py --dev`
+already prepared `build/src` up to date *in place*, the way `buildez.py --dev`
 does, but also for a normal (non --dev) tree, and then only compiles what
 changed:
 
@@ -21,12 +21,12 @@ changed:
                                     current patches (see below)
 
 The patches that are applied are recorded in build/download_cache/
-applied_patches (the same record `build.py` keeps). `sync` reverses the saved
+applied_patches (the same record `buildez.py` keeps). `sync` reverses the saved
 copies from the first changed patch onwards (strictly, no fuzz) and applies the
 current ones. It is all-or-nothing: the files those patches touch are backed up
 first and restored if anything does not undo or apply cleanly.
 
-This does NOT update `prepare_fingerprint.txt`: a later plain `python build.py`
+This does NOT update `prepare_fingerprint.txt`: a later plain `python buildez.py`
 still sees changed patches and prepares from scratch, which stays the reference
 for anything you release (domain/name substitution, i18n and PGO only happen
 there).
@@ -58,7 +58,7 @@ DEFAULT_JOBS = 8
 
 
 def load_build_module():
-    spec = importlib.util.spec_from_file_location('helium_build_py', ROOT / 'build.py')
+    spec = importlib.util.spec_from_file_location('helium_build_py', ROOT / 'buildez.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -174,12 +174,12 @@ def sync():
     tree-relative paths) touched by the patches that changed, or [] when
     nothing changed."""
     if not (SOURCE / 'BUILD.gn').exists():
-        die('build/src is not prepared; run `python build.py` once first.')
+        die('build/src is not prepared; run `python buildez.py` once first.')
     old = hb._load_applied_patches(CACHE)
     if old is None:
         die('there is no usable record of the applied patches '
             '(build/download_cache/applied_patches). If build/src already contains the '
-            'current patches, run `python quick.py adopt`; otherwise run `python build.py`.')
+            'current patches, run `python quick.py adopt`; otherwise run `python buildez.py`.')
     new = hb._patch_entries(ROOT)
 
     old_tail, new_tail = plan(old, new)
@@ -188,7 +188,7 @@ def sync():
         return []
     if max(len(old_tail), len(new_tail)) > MAX_TAIL:
         die(f'{len(old_tail)}/{len(new_tail)} patches affected (an upstream sync?); '
-            'run a full `python build.py` instead.')
+            'run a full `python buildez.py` instead.')
 
     saved = [saved_path(e) for e in old_tail]
     old_keys = {key(e) for e in old}
@@ -215,7 +215,7 @@ def sync():
               file=sys.stderr)
         restore_backup(backup)
         die('restored build/src to its previous state. Fix the patch (or run a full '
-            '`python build.py`).')
+            '`python buildez.py`).')
 
     hb._save_applied_patches(CACHE, new)
     shutil.rmtree(backup, ignore_errors=True)
@@ -290,7 +290,7 @@ def ninja_env():
 
 
 def run_ninja(targets, jobs):
-    """Like build.py: inside a shell with the Visual Studio variables, because
+    """Like buildez.py: inside a shell with the Visual Studio variables, because
     a changed BUILD.gn makes ninja regenerate its files with `gn`, and `gn`
     only finds the toolchain there."""
     os.environ.update(ninja_env())

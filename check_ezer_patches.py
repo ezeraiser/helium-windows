@@ -15,10 +15,10 @@ their context; this catches that in minutes instead of after a full
 clone + build cycle.
 
 Requires build/src to already exist as a git checkout (from a previous
-build.py run) -- this resets it in place with `git fetch`/`reset`/`clean`
+buildez.py run) -- this resets it in place with `git fetch`/`reset`/`clean`
 rather than doing a fresh clone, since only the file text is needed, not a
 compilable tree. Leaves build/src with only the non-ezer patches applied;
-running build.py afterwards resets and reapplies everything properly, so
+running buildez.py afterwards resets and reapplies everything properly, so
 this has no lasting side effects.
 """
 
@@ -38,7 +38,7 @@ _ROOT_DIR = Path(__file__).resolve().parent
 
 
 def _clear_readonly_tree(path):
-    """See build.py's copy of this helper: CIPD/npm mark some files
+    """See buildez.py's copy of this helper: CIPD/npm mark some files
     read-only on Windows, which makes `git clean` fail instead of removing
     them. Best-effort; a file we truly have no access to is left for the
     normal error to surface."""
@@ -57,7 +57,7 @@ def main():
     source_tree = _ROOT_DIR / 'build' / 'src'
     if not (source_tree / '.git').exists():
         get_logger().error(
-            'build/src is not a git checkout yet. Run build.py at least once first '
+            'build/src is not a git checkout yet. Run buildez.py at least once first '
             'so there is a tree to check the ezer patches against.')
         sys.exit(1)
 
@@ -83,16 +83,16 @@ def main():
     subprocess.run(['git', 'clean', '-ffdx', '-e', 'uc_staging'], cwd=source_tree, check=True)
 
     # The bundled patch.exe (third_party/git) comes from a downloaded package
-    # this script doesn't unpack, since that needs a full build.py run. Let
+    # this script doesn't unpack, since that needs a full buildez.py run. Let
     # patches.find_and_check_patch() fall back to PATCH_BIN or "patch" on
     # PATH (e.g. Git for Windows' usr/bin/patch, already used elsewhere in
     # this session) instead.
     patch_bin_path = None
 
     # Some baseline patches (e.g. ungoogled-chromium/fix-building-with-prunned-binaries.patch)
-    # only apply to a pruned tree, matching build.py's order: download -> prune -> patch.
+    # only apply to a pruned tree, matching buildez.py's order: download -> prune -> patch.
     # Files that pruning.list names but this tree lacks (DEPS-downloaded content such as
-    # chromium-bidi's node_modules) are legitimately absent here, same as in build.py.
+    # chromium-bidi's node_modules) are legitimately absent here, same as in buildez.py.
     get_logger().info('Pruning binaries (pruning.list)...')
     prune_binaries.prune_files(
         source_tree,

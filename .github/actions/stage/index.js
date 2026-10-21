@@ -119,7 +119,7 @@ async function run() {
     } else if (!upload_final) {
         await io.mkdirP(BUILD_DIR);
         if (ntfs_compression) {
-            // Mark the (still empty) build dir compressed so everything build.py writes into it
+            // Mark the (still empty) build dir compressed so everything buildez.py writes into it
             // inherits NTFS compression automatically, with no retroactive scan needed.
             await exec.exec('compact', ['/c', BUILD_DIR], {ignoreReturnCode: true});
 
@@ -129,7 +129,7 @@ async function run() {
         }
     }
 
-    const args = ['build.py', '--ci', String(started_at)]
+    const args = ['buildez.py', '--ci', String(started_at)]
     // CI only ships the portable ZIP, so skip the setup/mini_installer targets.
     args.push('--portable-only')
     if (process.env.HELIUM_BUILD_JOBS) {
@@ -186,19 +186,19 @@ async function run() {
         return;
     }
 
-    await exec.exec('python', ['-m', 'pip', 'install', 'httplib2==0.22.0', 'Pillow', 'clang-format'], {
+    await exec.exec('python', ['-m', 'pip', 'install', 'requests', 'Pillow'], {
         cwd: ROOT_DIR,
         ignoreReturnCode: true
     });
     
-    await logDiskSpace('Before build.py');
+    await logDiskSpace('Before buildez.py');
     
     const retCode = await exec.exec('python', args, {
         cwd: ROOT_DIR,
         ignoreReturnCode: true
     });
 
-    await logDiskSpace('After build.py completed');
+    await logDiskSpace('After buildez.py completed');
 
     if (retCode > 0 && retCode !== 42) {
         throw `Unexpected return code: ${retCode}`
