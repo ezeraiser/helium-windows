@@ -695,11 +695,12 @@ def main():
     sources = parser.add_mutually_exclusive_group()
     sources.add_argument(
         '--tarball', dest='tarball', action='store_true',
-        help='Download prepared Chromium archives (default for x64)')
+        help='Download prepared Chromium archives (the default; x64 only)')
     sources.add_argument(
         '--clone', dest='tarball', action='store_false',
-        help='Clone Chromium and prepare dependencies with gclient (default for ARM64)')
-    parser.set_defaults(tarball=None)
+        help='Clone Chromium and prepare dependencies with gclient instead of the '
+             'prepared archives. Opt-in; required with --arm.')
+    parser.set_defaults(tarball=True)
     parser.add_argument(
         '--dev',
         action='store_true'
@@ -729,10 +730,8 @@ def main():
     )
     args = parser.parse_args()
     args.portable_only = not args.installer
-    if args.tarball is None:
-        args.tarball = not args.arm
     if args.tarball and args.arm:
-        parser.error('the prepared Windows archive targets x64; use --clone for ARM64')
+        parser.error('the prepared Windows archive targets x64; pass --clone with --arm')
 
     # Set common variables
     source_tree = _ROOT_DIR / 'build' / 'src'

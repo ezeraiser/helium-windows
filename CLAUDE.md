@@ -193,10 +193,11 @@ fork of it, with everything described below, is **`buildez.py`**; `quick.py`,
 `build.py` from the previous merge base) and resolve the few conflicts. Every
 mention of `buildez.py` in the notes below used to be `build.py`.
 
-Since 0.20.1 the x64 default is `--tarball`: prepared archives
+Since 0.20.1 the default (x64 is the only target we build) is `--tarball`: prepared archives
 (`downloads.x64.ini`: base + win-x64, `.tar.zst` from tarballs.imput.net) are
 unpacked instead of cloning, there is no CIPD step (`install_cipd_deps.py` is
-gone) and `--clone` (gclient) is only the ARM64 default. Unpacking `.zst`
+gone) and `--clone` (gclient) is opt-in only -- nothing switches to it
+automatically; `--arm` is refused without an explicit `--clone`. Unpacking `.zst`
 needs a tar that knows zstd: Windows' `C:\Windows\system32	ar.exe` (bsdtar)
 does, Git-for-Windows' GNU tar and the Python fallback do not.
 
